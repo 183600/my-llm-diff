@@ -144,6 +144,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# User config files (contain API keys)
+config.yaml
+
 # Spyder project settings
 .spyderproject
 .spyproject

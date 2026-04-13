@@ -1,0 +1,70 @@
+# LLM 差异分析器配置文件
+# 复制此文件为 config.yaml 并填入实际值
+
+# 分析器配置 - 用于分析差异、打标签等
+analyzer:
+  model_name: "kimi-k2.5:free"
+  api_type: "openai"
+  # 从环境变量读取: ROUTIN_API_KEY
+  api_key: "${ROUTIN_API_KEY}"
+  base_url: "https://api.routin.ai/v1"
+
+# 问题生成器配置 - 用于生成问题
+generator:
+  model_name: "kimi-k2.5:free"
+  api_type: "openai"
+  # 从环境变量读取: ROUTIN_API_KEY
+  api_key: "${ROUTIN_API_KEY}"
+  base_url: "https://api.routin.ai/v1"
+
+# 用于生成回答的模型列表
+models:
+  # NVIDIA 模型
+  - name: "NVIDIA-kimi"
+    model_name: "moonshotai/kimi-k2.5"
+    api_type: "openai"
+    # 从环境变量读取: NVIDIA_API_KEY_1
+    api_key: "${NVIDIA_API_KEY_1}"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    enabled: true
+
+  # MODAL 模型
+  - name: "MODAL-GLM5"
+    model_name: "zai-org/GLM-5-FP8"
+    api_type: "openai"
+    # 从环境变量读取: MODAL_API_KEY_1
+    api_key: "${MODAL_API_KEY_1}"
+    base_url: "https://api.us-west-2.modal.direct/v1"
+    enabled: true
+
+  # IFLOW_CN 模型
+  - name: "IFLOW_CN-deepseek"
+    model_name: "deepseek-v3.2"
+    api_type: "openai"
+    # 从环境变量读取: IFLOW_CN_API_KEY
+    api_key: "${IFLOW_CN_API_KEY}"
+    base_url: "https://apis.iflow.cn/v1"
+    enabled: true
+
+  # IFLOW_ROME 模型
+  - name: "IFLOW_ROME"
+    model_name: "iflow-rome-30ba3b"
+    api_type: "openai"
+    # 从环境变量读取: IFLOW_ROME_API_KEY
+    api_key: "${IFLOW_ROME_API_KEY}"
+    base_url: "https://apis.iflow.cn/v1"
+    enabled: true
+
+  # ZENMUX 模型
+  - name: "ZENMUX-GLM"
+    model_name: "z-ai/glm-4.7-flash-free"
+    api_type: "openai"
+    # 从环境变量读取: ZENMUX_API_KEY
+    api_key: "${ZENMUX_API_KEY}"
+    base_url: "https://zenmux.ai/api/v1"
+    enabled: true
+
+# 分析参数
+analysis:
+  question_count: 5
+  use_example_style: true

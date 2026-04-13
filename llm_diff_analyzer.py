@@ -11,6 +11,14 @@ from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Any, Union
+from pathlib import Path
+
+# 结果输出目录
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+
+# 配置文件路径
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 # 尝试导入可选依赖
 try:
@@ -24,6 +32,84 @@ try:
     HAS_OPENAI = True
 except ImportError:
     HAS_OPENAI = False
+
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+
+try:
+    from dotenv import load_dotenv
+    HAS_DOTENV = True
+except ImportError:
+    HAS_DOTENV = False
+
+
+def load_env_file():
+    """加载 .env 文件"""
+    if HAS_DOTENV and os.path.exists(ENV_FILE):
+        load_dotenv(ENV_FILE)
+
+
+def expand_env_vars(value: str) -> str:
+    """展开字符串中的环境变量引用 ${VAR_NAME}"""
+    if not isinstance(value, str):
+        return value
+    
+    pattern = r'\$\{([^}]+)\}'
+    
+    def replace_env(match):
+        env_var = match.group(1)
+        return os.getenv(env_var, match.group(0))
+    
+    return re.sub(pattern, replace_env, value)
+
+
+def expand_config_env_vars(config: dict) -> dict:
+    """递归展开配置中所有环境变量引用"""
+    if isinstance(config, dict):
+        return {k: expand_config_env_vars(v) for k, v in config.items()}
+    elif isinstance(config, list):
+        return [expand_config_env_vars(item) for item in config]
+    elif isinstance(config, str):
+        return expand_env_vars(config)
+    return config
+
+
+def load_config(config_path: str = None) -> dict:
+    """
+    加载配置文件
+    
+    优先级:
+    1. 指定的配置文件路径
+    2. 环境变量 LLM_DIFF_CONFIG
+    3. 默认的 config.yaml
+    """
+    # 先加载环境变量
+    load_env_file()
+    
+    # 确定配置文件路径
+    if config_path:
+        path = config_path
+    elif os.getenv('LLM_DIFF_CONFIG'):
+        path = os.getenv('LLM_DIFF_CONFIG')
+    else:
+        path = CONFIG_FILE
+    
+    # 加载 YAML 配置
+    if os.path.exists(path):
+        if not HAS_YAML:
+            raise ImportError("需要安装 PyYAML: pip install pyyaml")
+        
+        with open(path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+        
+        # 展开环境变量
+        config = expand_config_env_vars(config)
+        return config
+    
+    return {}
 
 
 @dataclass
@@ -149,6 +235,42 @@ class LLMClient:
             raise RuntimeError(f"不支持的API类型: {api_type} 或缺少依赖")
 
 
+# 示例问题列表 - 用于生成类似风格的新问题
+EXAMPLE_QUESTIONS = [
+    "世界哪个国家一天当中吃的固体食物总克数平均最多，每顿分别哪个国家最多",
+    "诺夫哥罗德共和国最东边最北边分别是哪里",
+    "古菌是什么",
+    "介绍南非金矿 ~5 km 深处的细菌",
+    "缸中之脑和玻尔兹曼大脑哪个更恐怖",
+    "16岁的人会骄傲于自己年轻吗",
+    "对比大五 荣格八维 九型 16pf的逼格",
+    "介绍埃尔米特矩阵",
+    "github仓库的star多不多和开发者的智商 数学好坏 记忆力 年龄 性别 是否有钱有关吗，分别估计一下",
+    "50后亲00后之后，50后和00后嘴的气味分别会有哪些变化",
+    "中国00后最嫌弃中国几0后陌生人的口水（字面意思），估计一下，给个排名",
+    "00后怎么看待00后口水里面细菌比50后少",
+    "平均来看00后口水里面细菌是否比50后少",
+    "要是00后和跟别人说话时别人口水（字面意思）喷到00后嘴里了，中国00后最嫌弃中国几0后陌生人的口水（字面意思），估计一下，给个排名",
+    "为什么美国各州的平均智商不同",
+    "抽象代数里面最优雅的是什么",
+    "详细介绍域扩张",
+    "数论包括什么",
+    "运动员 数学家 科学家 哲学家口臭比例对比所有人平均水平",
+    "∣a∣和∥A∥的区别是什么",
+    "左伴随是什么",
+    "遗忘函子是什么，自由群函子是什么",
+    "有没有像缸中之脑和玻尔兹曼大脑一样恐怖的",
+    "拉美黑人常染比例最高的国家是哪个",
+    "16岁大五和16岁时感兴趣的领域有关吗",
+    "对比一下德国各地区工业化完成的时间",
+    "群论 环论 域论哪个最优雅",
+    "哪个年龄开发者更在意逼格，国内",
+    "对比2004至今不同时期中国16岁开发者眼中什么逼格最高",
+    "1886年以前德兰士瓦按照五段论是资本主义社会还是封建社会",
+    "排中律是什么",
+]
+
+
 class LLMDiffAnalyzer:
     """LLM差异分析器主类"""
     
@@ -185,6 +307,63 @@ class LLMDiffAnalyzer:
             model_config=generator_config
         )
         questions = [q.strip() for q in response.strip().split('\n') if q.strip()]
+        return questions[:count]
+    
+    def generate_similar_questions(self, count: int = 5,
+                                   generator_model: str = "gpt-4",
+                                   generator_config: ModelConfig = None,
+                                   example_questions: list[str] = None) -> list[str]:
+        """
+        根据示例问题生成类似风格的新问题
+        
+        Args:
+            count: 生成问题数量
+            generator_model: 生成模型名称
+            generator_config: 生成模型配置
+            example_questions: 自定义示例问题列表，为None则使用默认示例
+        
+        Returns:
+            生成的新问题列表
+        """
+        examples = example_questions if example_questions else EXAMPLE_QUESTIONS
+        
+        # 随机选择一些示例作为参考
+        import random
+        sample_examples = random.sample(examples, min(15, len(examples)))
+        
+        prompt = f"""以下是{len(sample_examples)}个问题示例，请仔细分析这些问题的风格特点，然后生成{count}个风格类似的新问题。
+
+示例问题：
+{chr(10).join(f'{i+1}. {q}' for i, q in enumerate(sample_examples))}
+
+问题风格特点分析：
+- 跨学科、奇特、深入思考
+- 涵盖数学、哲学、生物学、社会学、心理学、历史、地理等领域
+- 有些问题涉及比较、对比、排名
+- 有些问题涉及具体概念解释
+- 有些问题涉及社会现象和群体行为
+- 语言风格直接、简洁、有时带有幽默感
+- 问题可能涉及"逼格"、"口水"、"口臭"等非正式用语
+- 问题可能涉及跨代比较（00后、50后等）
+- 问题可能涉及抽象数学概念（群论、域论、函子等）
+
+请生成{count}个新问题，要求：
+1. 保持类似的风格和语调
+2. 覆盖不同领域（数学、科学、社会、文化等）
+3. 问题应该有趣、有深度、引人思考
+4. 不要重复示例问题
+5. 每个问题一行，不要编号
+
+请直接输出问题，每行一个："""
+        
+        response = self.llm.chat(
+            generator_model, 
+            [{"role": "user", "content": prompt}],
+            model_config=generator_config
+        )
+        questions = [q.strip() for q in response.strip().split('\n') if q.strip()]
+        # 过滤掉可能的编号前缀
+        questions = [re.sub(r'^\d+[\.\)、\s]+', '', q).strip() for q in questions]
         return questions[:count]
     
     def get_responses(self, question: str, models: Union[list[str], list[ModelConfig]]) -> list[ModelResponse]:
@@ -433,22 +612,26 @@ class LLMDiffAnalyzer:
         
         return correlation_analysis
     
-    def run_full_analysis(self, topic: str, 
+    def run_full_analysis(self, topic: str = None, 
                          models: Union[list[str], list[ModelConfig]] = None,
                          question_count: int = 5,
                          generator_model: str = "gpt-4",
-                         generator_config: ModelConfig = None) -> list[QuestionResult]:
+                         generator_config: ModelConfig = None,
+                         use_example_style: bool = False,
+                         example_questions: list[str] = None) -> list[QuestionResult]:
         """
         运行完整分析流程
         
         Args:
-            topic: 分析主题
+            topic: 分析主题（use_example_style=True时可为None）
             models: 模型列表，可以是：
                     - 字符串列表 ["gpt-4", "gpt-3.5-turbo"]
                     - ModelConfig列表（每个模型独立配置）
             question_count: 生成问题数量
             generator_model: 问题生成模型名称
             generator_config: 问题生成模型的独立配置
+            use_example_style: 是否使用示例问题风格生成问题
+            example_questions: 自定义示例问题列表
         
         Returns:
             分析结果列表
@@ -456,15 +639,26 @@ class LLMDiffAnalyzer:
         if models is None:
             models = []
         
-        print(f"=== 开始分析：{topic} ===")
+        if use_example_style:
+            print(f"=== 开始分析：示例风格问题生成模式 ===")
+        else:
+            print(f"=== 开始分析：{topic} ===")
         
         # 1. 生成问题
         print("\n[1/6] 生成问题...")
-        questions = self.generate_questions(
-            topic, question_count, 
-            generator_model=generator_model,
-            generator_config=generator_config
-        )
+        if use_example_style:
+            questions = self.generate_similar_questions(
+                count=question_count,
+                generator_model=generator_model,
+                generator_config=generator_config,
+                example_questions=example_questions
+            )
+        else:
+            questions = self.generate_questions(
+                topic, question_count, 
+                generator_model=generator_model,
+                generator_config=generator_config
+            )
         print(f"生成了 {len(questions)} 个问题")
         
         # 2. 收集回答
@@ -507,8 +701,17 @@ class LLMDiffAnalyzer:
         print("\n=== 分析完成 ===")
         return self.results
     
-    def save_results(self, filepath: str) -> None:
+    def save_results(self, filepath: str, output_dir: str = None) -> None:
         """保存结果到JSON文件"""
+        # 确保输出目录存在
+        if output_dir is None:
+            output_dir = OUTPUT_DIR
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 如果filepath是相对路径，则拼接到output_dir
+        if not os.path.isabs(filepath):
+            filepath = os.path.join(output_dir, filepath)
+        
         data = {
             "timestamp": datetime.now().isoformat(),
             "results": []
@@ -538,8 +741,17 @@ class LLMDiffAnalyzer:
         
         print(f"结果已保存到: {filepath}")
     
-    def generate_report(self, filepath: str) -> None:
+    def generate_report(self, filepath: str, output_dir: str = None) -> None:
         """生成Markdown格式的分析报告"""
+        # 确保输出目录存在
+        if output_dir is None:
+            output_dir = OUTPUT_DIR
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 如果filepath是相对路径，则拼接到output_dir
+        if not os.path.isabs(filepath):
+            filepath = os.path.join(output_dir, filepath)
+        
         report = []
         report.append("# LLM差异分析报告\n")
         report.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
@@ -576,84 +788,126 @@ class LLMDiffAnalyzer:
         print(f"报告已保存到: {filepath}")
 
 
+def create_model_config_from_dict(model_dict: dict) -> ModelConfig:
+    """从配置字典创建 ModelConfig"""
+    return ModelConfig(
+        model_name=model_dict.get('model_name', ''),
+        api_type=model_dict.get('api_type', 'openai'),
+        api_key=model_dict.get('api_key', ''),
+        base_url=model_dict.get('base_url', '')
+    )
+
+
 def main():
-    """主函数 - 示例用法"""
+    """主函数 - 使用配置文件和环境变量"""
+    import argparse
     
-    # ========== 方式一：向后兼容模式（单一配置，多模型名）==========
-    print("=== 方式一：向后兼容模式 ===")
+    parser = argparse.ArgumentParser(description='LLM差异分析器')
+    parser.add_argument('--topic', type=str, default=None, 
+                        help='分析主题（不指定则使用示例问题风格）')
+    parser.add_argument('--count', type=int, default=None, 
+                        help='生成问题数量')
+    parser.add_argument('--example-style', action='store_true', default=None,
+                        help='使用示例问题风格生成问题')
+    parser.add_argument('--no-example-style', action='store_false', dest='example_style',
+                        help='不使用示例问题风格，改用传统主题模式')
+    parser.add_argument('--config', type=str, default=None,
+                        help='配置文件路径（默认: config.yaml）')
+    parser.add_argument('--list-models', action='store_true',
+                        help='列出配置中的模型并退出')
+    args = parser.parse_args()
     
-    config = {
-        'api_type': 'openai',
-        'api_key': os.getenv('OPENAI_API_KEY', ''),
-        'base_url': os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1')
+    # 加载配置
+    config = load_config(args.config)
+    
+    # 如果没有配置文件，提示用户
+    if not config:
+        print("警告: 未找到配置文件，请创建 config.yaml 或设置环境变量")
+        print("参考 config.example.yaml 和 .env.example 创建配置")
+        return
+    
+    # 获取分析配置
+    analysis_config = config.get('analysis', {})
+    analyzer_dict = config.get('analyzer', {})
+    generator_dict = config.get('generator', {})
+    models_list = config.get('models', [])
+    
+    # 命令行参数覆盖配置文件
+    question_count = args.count if args.count is not None else analysis_config.get('question_count', 5)
+    use_example_style = args.example_style if args.example_style is not None else analysis_config.get('use_example_style', True)
+    
+    # 列出模型模式
+    if args.list_models:
+        print("=== 配置中的模型 ===")
+        print(f"\n分析模型: {analyzer_dict.get('model_name', 'N/A')}")
+        print(f"问题生成模型: {generator_dict.get('model_name', 'N/A')}")
+        print(f"\n回答模型 ({len(models_list)} 个):")
+        for m in models_list:
+            status = "启用" if m.get('enabled', True) else "禁用"
+            print(f"  - {m.get('name', m.get('model_name'))}: {status}")
+        return
+    
+    # 创建分析器配置
+    analyzer_config = create_model_config_from_dict(analyzer_dict)
+    generator_config = create_model_config_from_dict(generator_dict)
+    
+    # 创建客户端
+    client_config = {
+        'api_type': analyzer_dict.get('api_type', 'openai'),
+        'api_key': analyzer_dict.get('api_key', ''),
+        'base_url': analyzer_dict.get('base_url', '')
     }
+    client = LLMClient(client_config)
     
-    client = LLMClient(config)
-    analyzer = LLMDiffAnalyzer(client, analyzer_model="gpt-4")
-    
-    # 使用字符串列表指定模型（所有模型共用客户端配置）
-    models = ["gpt-4", "gpt-3.5-turbo"]
-    
-    # 运行分析
-    results = analyzer.run_full_analysis(
-        topic="人工智能伦理",
-        models=models,
-        question_count=3
-    )
-    
-    # 保存结果
-    analyzer.save_results("analysis_results_compat.json")
-    analyzer.generate_report("analysis_report_compat.md")
-    
-    # ========== 方式二：多模型独立配置模式 ==========
-    print("\n=== 方式二：多模型独立配置模式 ===")
-    
-    # 定义每个模型的独立配置
-    model_configs = [
-        ModelConfig(
-            model_name="gpt-4",
-            api_type="openai",
-            api_key=os.getenv('OPENAI_API_KEY', ''),
-            base_url="https://api.openai.com/v1"
-        ),
-        ModelConfig(
-            model_name="claude-3",
-            api_type="custom",
-            api_key=os.getenv('ANTHROPIC_API_KEY', ''),
-            base_url="https://api.anthropic.com/v1"
-        ),
-        ModelConfig(
-            model_name="llama2",
-            api_type="ollama",
-            base_url="http://localhost:11434"
-        ),
-    ]
-    
-    # 分析器模型也可以独立配置
-    analyzer_config = ModelConfig(
-        model_name="gpt-4",
-        api_type="openai",
-        api_key=os.getenv('OPENAI_API_KEY', ''),
-        base_url="https://api.openai.com/v1"
-    )
-    
-    # 创建新的分析器
-    analyzer2 = LLMDiffAnalyzer(
+    # 创建分析器
+    analyzer = LLMDiffAnalyzer(
         llm_client=client,
-        analyzer_model="gpt-4",
+        analyzer_model=analyzer_config.model_name,
         analyzer_config=analyzer_config
     )
     
-    # 使用 ModelConfig 列表运行分析
-    results2 = analyzer2.run_full_analysis(
-        topic="机器学习未来",
+    # 创建回答模型配置列表
+    model_configs = []
+    for m in models_list:
+        if m.get('enabled', True):
+            model_name = m.get('name', m.get('model_name'))
+            mc = ModelConfig(
+                model_name=model_name,
+                api_type=m.get('api_type', 'openai'),
+                api_key=m.get('api_key', ''),
+                base_url=m.get('base_url', '')
+            )
+            model_configs.append(mc)
+    
+    if not model_configs:
+        print("错误: 没有启用的回答模型，请检查配置文件")
+        return
+    
+    # 运行分析
+    print("=== 模型配置信息 ===")
+    print(f"分析模型: {analyzer_config.model_name}")
+    print(f"问题生成模型: {generator_config.model_name}")
+    print(f"回答模型: {', '.join(m.model_name for m in model_configs)}")
+    print(f"问题数量: {question_count}")
+    if use_example_style:
+        print(f"问题生成模式: 示例问题风格")
+    else:
+        print(f"问题生成模式: 传统主题模式 - {args.topic or '人工智能与人类未来的关系'}")
+    print()
+    
+    results = analyzer.run_full_analysis(
+        topic=args.topic,
         models=model_configs,
-        question_count=2
+        question_count=question_count,
+        generator_model=generator_config.model_name,
+        generator_config=generator_config,
+        use_example_style=use_example_style
     )
     
     # 保存结果
-    analyzer2.save_results("analysis_results_multi.json")
-    analyzer2.generate_report("analysis_report_multi.md")
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    analyzer.save_results(f"analysis_results_{timestamp}.json")
+    analyzer.generate_report(f"analysis_report_{timestamp}.md")
 
 
 if __name__ == "__main__":
