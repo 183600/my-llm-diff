@@ -8,6 +8,7 @@ analyzer:
   # 从环境变量读取: ROUTIN_API_KEY
   api_key: "${ROUTIN_API_KEY}"
   base_url: "https://api.routin.ai/v1"
+  timeout: 1000  # API请求超时时间（秒），默认120秒
 
 # 问题生成器配置 - 用于生成问题
 generator:
@@ -16,6 +17,7 @@ generator:
   # 从环境变量读取: ROUTIN_API_KEY
   api_key: "${ROUTIN_API_KEY}"
   base_url: "https://api.routin.ai/v1"
+  timeout: 1000  # API请求超时时间（秒），默认120秒
 
 # 用于生成回答的模型列表（全部使用 NVIDIA API）
 # 一个模型生成失败不影响其他模型生成回答
@@ -30,13 +32,6 @@ models:
 
   - name: "qwq-32b"
     model_name: "qwq-32b"
-    api_type: "openai"
-    api_key: "${NVIDIA_API_KEY}"
-    base_url: "https://integrate.api.nvidia.com/v1"
-    enabled: true
-
-  - name: "deepseek-r1-distill-qwen-14b"
-    model_name: "deepseek-r1-distill-qwen-14b"
     api_type: "openai"
     api_key: "${NVIDIA_API_KEY}"
     base_url: "https://integrate.api.nvidia.com/v1"

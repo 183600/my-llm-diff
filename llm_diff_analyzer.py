@@ -33,10 +33,12 @@ except ImportError:
     HAS_REQUESTS = False
 
 try:
-    from openai import OpenAI
+    from openai import OpenAI, APITimeoutError, APIConnectionError
     HAS_OPENAI = True
 except ImportError:
     HAS_OPENAI = False
+    APITimeoutError = Exception
+    APIConnectionError = Exception
 
 try:
     import yaml
@@ -124,6 +126,7 @@ class ModelConfig:
     api_type: str = "openai"  # openai, ollama, custom
     api_key: str = ""  # API密钥，为空则从环境变量读取
     base_url: str = ""  # API基础URL，为空则使用默认值
+    timeout: float = 120.0  # API请求超时时间（秒）
     
     def __post_init__(self):
         """初始化后处理默认值"""
@@ -490,21 +493,27 @@ class ContinuousRunner:
                  generator_config: ModelConfig = None,
                  use_example_style: bool = True,
                  example_questions: List[str] = None,
-                 on_complete: callable = None):
+                 on_complete: callable = None,
+                 max_retries: int = 3,
+                 retry_delay: int = 60,
+                 error_cooldown: int = 300):
         """
-        持续运行循环
+        持续运行循环（支持无限运行）
         
         Args:
             analyzer: 分析器实例
             models: 模型配置列表
             question_count: 每次生成的问题数量
             interval_minutes: 运行间隔（分钟）
-            max_runs: 最大运行次数（None表示无限）
+            max_runs: 最大运行次数（None表示无限运行）
             generator_model: 问题生成模型
             generator_config: 问题生成模型配置
             use_example_style: 是否使用示例问题风格
             example_questions: 自定义示例问题
             on_complete: 每次完成后的回调函数
+            max_retries: 单次运行最大重试次数
+            retry_delay: 重试间隔（秒）
+            error_cooldown: 连续错误后的冷却时间（秒）
         """
         self.running = True
         state = self._load_state()
@@ -514,12 +523,14 @@ class ContinuousRunner:
         
         run_count = 0
         interval_seconds = interval_minutes * 60
+        consecutive_errors = 0  # 连续错误计数
         
         print(f"\n{'='*60}")
-        print(f"持续运行模式启动")
+        print(f"持续运行模式启动（无限运行）")
         print(f"运行间隔: {interval_minutes} 分钟")
         print(f"每次问题数: {question_count}")
         print(f"最大运行次数: {'无限' if max_runs is None else max_runs}")
+        print(f"最大重试次数: {max_retries}")
         print(f"历史问题数: {self.history.get_stats()['total_questions']}")
         print(f"{'='*60}\n")
         
@@ -536,45 +547,85 @@ class ContinuousRunner:
                 print(f"第 {run_count} 次运行 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 print(f"{'─'*60}")
                 
-                try:
-                    # 运行分析
-                    results = analyzer.run_full_analysis(
-                        topic=None,
-                        models=models,
-                        question_count=question_count,
-                        generator_model=generator_model,
-                        generator_config=generator_config,
-                        use_example_style=use_example_style,
-                        example_questions=example_questions
-                    )
+                # 带重试的运行
+                run_success = False
+                for retry in range(max_retries):
+                    try:
+                        # 运行分析
+                        results = analyzer.run_full_analysis(
+                            topic=None,
+                            models=models,
+                            question_count=question_count,
+                            generator_model=generator_model,
+                            generator_config=generator_config,
+                            use_example_style=use_example_style,
+                            example_questions=example_questions
+                        )
+                        
+                        # 记录问题到历史
+                        actual_questions = [r.question for r in results]
+                        new_questions = self.history.add_questions(actual_questions)
+                        
+                        # 保存结果
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        analyzer.save_results(f"analysis_results_{timestamp}.json")
+                        analyzer.generate_report(f"analysis_report_{timestamp}.md")
+                        
+                        # 更新状态
+                        state['total_runs'] += 1
+                        state['total_questions'] += len(new_questions)
+                        state['last_run'] = datetime.now().isoformat()
+                        self._save_state(state)
+                        
+                        print(f"\n本次新增问题: {len(new_questions)}/{len(actual_questions)}")
+                        print(f"累计运行次数: {state['total_runs']}")
+                        print(f"累计问题数: {state['total_questions']}")
+                        
+                        # 回调
+                        if on_complete:
+                            on_complete(results, state)
+                        
+                        run_success = True
+                        consecutive_errors = 0  # 重置连续错误计数
+                        break
+                        
+                    except Exception as e:
+                        error_type = type(e).__name__
+                        error_msg = str(e)
+                        print(f"运行出错 ({error_type}): {error_msg}")
+                        
+                        # 判断是否是可重试的错误
+                        is_retryable = any(keyword in error_msg.lower() for keyword in [
+                            'timeout', 'rate limit', 'throttl', 'connection', 
+                            'network', 'temporarily', 'unavailable', '503', '502', '429'
+                        ])
+                        
+                        if is_retryable and retry < max_retries - 1:
+                            wait_time = retry_delay * (retry + 1)  # 指数退避
+                            print(f"可重试错误，{wait_time}秒后进行第 {retry + 2} 次尝试...")
+                            for _ in range(wait_time):
+                                if not self.running:
+                                    break
+                                time.sleep(1)
+                        else:
+                            state['errors'] += 1
+                            self._save_state(state)
+                
+                # 处理运行失败
+                if not run_success:
+                    consecutive_errors += 1
+                    print(f"本次运行失败，累计连续错误: {consecutive_errors}")
                     
-                    # 记录问题到历史
-                    actual_questions = [r.question for r in results]
-                    new_questions = self.history.add_questions(actual_questions)
-                    
-                    # 保存结果
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    analyzer.save_results(f"analysis_results_{timestamp}.json")
-                    analyzer.generate_report(f"analysis_report_{timestamp}.md")
-                    
-                    # 更新状态
-                    state['total_runs'] += 1
-                    state['total_questions'] += len(new_questions)
-                    state['last_run'] = datetime.now().isoformat()
-                    self._save_state(state)
-                    
-                    print(f"\n本次新增问题: {len(new_questions)}/{len(actual_questions)}")
-                    print(f"累计运行次数: {state['total_runs']}")
-                    print(f"累计问题数: {state['total_questions']}")
-                    
-                    # 回调
-                    if on_complete:
-                        on_complete(results, state)
-                    
-                except Exception as e:
-                    print(f"运行出错: {e}")
-                    state['errors'] += 1
-                    self._save_state(state)
+                    # 连续错误过多时增加冷却时间
+                    if consecutive_errors >= 3:
+                        cooldown = error_cooldown * consecutive_errors
+                        print(f"连续错误较多，进入冷却等待 {cooldown} 秒...")
+                        for _ in range(cooldown):
+                            if not self.running:
+                                break
+                            self.wait_if_paused()
+                            time.sleep(1)
+                        consecutive_errors = 0  # 重置，给新的机会
                 
                 # 等待下次运行
                 if self.running and (max_runs is None or run_count < max_runs):
@@ -591,6 +642,17 @@ class ContinuousRunner:
         
         except KeyboardInterrupt:
             print("\n用户中断，正在停止...")
+        
+        except Exception as e:
+            print(f"\n严重错误: {type(e).__name__}: {e}")
+            print("程序将尝试继续运行...")
+            # 不退出，而是尝试继续（如果还在运行）
+            if self.running:
+                self.run_loop(
+                    analyzer, models, question_count, interval_minutes, max_runs,
+                    generator_model, generator_config, use_example_style,
+                    example_questions, on_complete, max_retries, retry_delay, error_cooldown
+                )
         
         finally:
             self.running = False
@@ -624,22 +686,29 @@ class LLMClient:
             api_type = model_config.api_type
             api_key = model_config.api_key
             base_url = model_config.base_url
+            timeout = getattr(model_config, 'timeout', 120.0)
         else:
             api_type = self.api_type
             api_key = self.api_key
             base_url = self.base_url
+            timeout = 120.0
         
         # 对于OpenAI类型，使用缓存的客户端
         openai_client = None
         if api_type == 'openai' and HAS_OPENAI:
-            cache_key = (api_key, base_url)
+            cache_key = (api_key, base_url, timeout)
             if cache_key not in self._clients_cache:
-                self._clients_cache[cache_key] = OpenAI(api_key=api_key, base_url=base_url)
+                self._clients_cache[cache_key] = OpenAI(
+                    api_key=api_key, 
+                    base_url=base_url,
+                    timeout=timeout
+                )
             openai_client = self._clients_cache[cache_key]
         
         return api_type, api_key, base_url, openai_client
     
-    def chat(self, model: str, messages: list, model_config: ModelConfig = None, **kwargs) -> str:
+    def chat(self, model: str, messages: list, model_config: ModelConfig = None, 
+             max_retries: int = 3, **kwargs) -> str:
         """
         发送聊天请求
         
@@ -647,6 +716,7 @@ class LLMClient:
             model: 模型名称
             messages: 消息列表
             model_config: 可选的模型配置，用于覆盖默认配置
+            max_retries: 最大重试次数（针对超时和连接错误）
             **kwargs: 其他参数传递给API
         
         Returns:
@@ -655,12 +725,23 @@ class LLMClient:
         api_type, api_key, base_url, openai_client = self._get_client(model_config)
         
         if api_type == 'openai' and openai_client:
-            response = openai_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                **kwargs
-            )
-            return response.choices[0].message.content
+            last_error = None
+            for attempt in range(max_retries):
+                try:
+                    response = openai_client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        **kwargs
+                    )
+                    return response.choices[0].message.content
+                except (APITimeoutError, APIConnectionError) as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 5  # 递增等待时间
+                        print(f"API 请求超时/连接错误，{wait_time}秒后重试 (尝试 {attempt + 2}/{max_retries})...")
+                        time.sleep(wait_time)
+                    continue
+            raise last_error or RuntimeError("API 请求失败")
         
         elif api_type == 'ollama' and HAS_REQUESTS:
             url = f"{base_url}/api/chat"
@@ -995,31 +1076,107 @@ class LLMDiffAnalyzer:
     
     def tag_responses(self, question: str, responses: list[ModelResponse],
                       model_config: ModelConfig = None) -> None:
-        """为各个回答打标签"""
+        """为各个回答打标签，关注细节差异，使用标准化格式便于后续合并"""
+        # 先构建所有回答的摘要，用于比较
+        all_responses_summary = "\n\n".join([
+            f"【{r.model_name}】: {r.response[:500]}..."
+            for r in responses
+        ])
+        
+        # 构建其他模型名称列表，用于对比
+        other_models = [r.model_name for r in responses]
+        
         for response in responses:
-            prompt = f"""请为以下回答打上标签。
+            prompt = f"""请为以下回答打上细粒度标签，重点描述这个回答与其他回答的具体差异细节。
 
 问题：{question}
-回答：{response.response}
 
-请给出5-8个标签来描述这个回答的特点，包括：
-- 内容风格（如：详细、简洁、学术化、口语化等）
-- 论证方式（如：举例说明、逻辑推理、引用数据等）
-- 内容质量（如：准确、有深度、有创意等）
-- 其他特点
+所有回答摘要（用于对比）：
+{all_responses_summary}
 
-请直接输出标签，用逗号分隔："""
-            
+当前需要打标签的回答：【{response.model_name}】:
+{response.response}
+
+---
+
+**重要：标签格式规范（必须严格遵循）**
+
+每个标签采用固定格式：`[动作类型]::[具体对象]`
+
+**动作类型（固定词汇，便于后续合并）：**
+- `提及` - 提及了某个概念/名词/术语
+- `遗漏` - 遗漏了某个重要内容
+- `补充` - 补充了额外信息
+- `解释` - 详细解释了某个概念
+- `强调` - 特别强调了某个观点
+- `反对` - 明确反对某个观点
+- `支持` - 明确支持某个观点
+- `质疑` - 对某个观点提出疑问
+- `列举` - 列举了具体案例/例子
+- `给出` - 给出了具体数值/数据
+- `引用` - 引用了具体来源/文献
+- `对比` - 对比了具体对象/概念
+- `聚焦` - 聚焦于某个方面/领域
+- `使用` - 使用了具体方法/比喻/类比
+- `结构` - 回答结构特点（如：结构::分层论述）
+- `风格` - 表达风格特点（如：风格::学术严谨）
+- `长度` - 回答长度特点（如：长度::详细）
+
+**具体对象规则：**
+1. 必须是具体的名词、概念、数值、案例名等
+2. 不能是模糊的描述词（如"一些内容"、"某些观点"）
+3. 多个对象用顿号分隔（如：提及::量子力学、相对论）
+
+**示例标签：**
+- 提及::量子力学、波函数坍缩
+- 遗漏::实验数据验证
+- 补充::历史背景介绍
+- 解释::缸中之脑哲学思想实验
+- 强调::主观体验无法被客观化
+- 反对::物理主义还原论
+- 列举::3个经典悖论案例
+- 给出::具体概率数值50%
+- 引用::笛卡尔《第一哲学沉思集》
+- 对比::缸中之脑与玻尔兹曼大脑
+- 聚焦::哲学认识论层面
+- 使用::计算机模拟类比
+- 结构::总分总结构
+- 风格::通俗幽默
+- 长度::中等篇幅
+
+**打标签要求：**
+1. 给出8-12个标签
+2. 每个标签必须描述**具体差异**，而非笼统描述
+3. 关注这个回答与其他回答的**不同之处**
+4. 标签要细粒度，比如"提及::量子力学"比"提及::物理概念"更好
+5. 按重要性排序，最重要的差异标签放前面
+
+请直接输出标签，每行一个，格式为：动作类型::具体对象"""
+
             tags_str = self.llm.chat(
                 self.analyzer_model, 
                 [{"role": "user", "content": prompt}],
                 model_config=model_config
             )
-            response.tags = [t.strip() for t in tags_str.split(',') if t.strip()]
+            # 解析标签，支持逗号分隔或换行分隔
+            tags = []
+            for line in tags_str.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                # 如果一行有多个逗号分隔的标签
+                if ',' in line and '::' not in line:
+                    tags.extend([t.strip() for t in line.split(',') if t.strip()])
+                elif '，' in line and '::' not in line:
+                    tags.extend([t.strip() for t in line.split('，') if t.strip()])
+                else:
+                    tags.append(line)
+            
+            response.tags = [t for t in tags if t.strip()]
     
     def merge_similar_tags(self, results: list[QuestionResult],
                           model_config: ModelConfig = None) -> dict:
-        """合并同义词或近义词标签"""
+        """合并同义词或近义词标签，使用LLM进行智能合并"""
         # 收集所有标签
         all_tags = []
         for result in results:
@@ -1031,112 +1188,369 @@ class LLMDiffAnalyzer:
         
         unique_tags = list(set(all_tags))
         
-        prompt = f"""请分析以下标签，将同义词或近义词合并。
-
-标签列表：
-{', '.join(unique_tags)}
-
-请将意思相近的标签归类，输出格式：
-类别名: 标签1, 标签2, 标签3
-
-每个类别一行，确保所有标签都被归类。类别名应该是一个能代表该类标签的通用词。"""
+        # 首先进行本地预合并（动作类型层面的标准化）
+        action_synonyms = {
+            # 提及类
+            '提到': '提及', '谈到': '提及', '涉及': '提及', '包含': '提及', '谈到过': '提及',
+            # 遗漏类
+            '缺少': '遗漏', '未提及': '遗漏', '忽略': '遗漏', '没提': '遗漏', '漏掉': '遗漏',
+            # 补充类
+            '增加': '补充', '添加': '补充', '额外提': '补充', '补充说明': '补充',
+            # 解释类
+            '阐述': '解释', '说明': '解释', '详解': '解释', '解释说明': '解释',
+            # 强调类
+            '突出': '强调', '着重': '强调', '特别提': '强调', '重点指出': '强调',
+            # 反对类
+            '否定': '反对', '批驳': '反对', '不同意': '反对',
+            # 支持类
+            '认同': '支持', '赞同': '支持', '同意': '支持',
+            # 质疑类
+            '怀疑': '质疑', '疑问': '质疑', '提出疑问': '质疑',
+            # 列举类
+            '罗列': '列举', '列出': '列举', '举例': '列举',
+            # 给出类
+            '提供': '给出', '呈现': '给出',
+            # 引用类
+            '引述': '引用', '援引': '引用', '参考': '引用',
+            # 对比类
+            '比较': '对比', '对照': '对比', '比较分析': '对比',
+            # 聚焦类
+            '关注': '聚焦', '集中于': '聚焦', '重点讨论': '聚焦',
+            # 使用类
+            '采用': '使用', '运用': '使用', '应用': '使用',
+        }
         
+        # 标准化动作类型
+        standardized_tags = []
+        for tag in unique_tags:
+            if '::' in tag:
+                action, obj = tag.split('::', 1)
+                # 标准化动作
+                std_action = action_synonyms.get(action, action)
+                standardized_tags.append(f"{std_action}::{obj}")
+            else:
+                # 兼容旧格式，尝试解析
+                standardized_tags.append(tag)
+        
+        unique_tags = list(set(standardized_tags))
+        
+        prompt = f"""请分析以下标签，将语义相近的标签合并为类别。
+
+标签列表（格式：动作类型::具体对象）：
+{chr(10).join(f'- {tag}' for tag in unique_tags)}
+
+**合并规则：**
+
+1. **动作类型相同的标签**：如果具体对象语义相近，可以合并
+   - 例如："提及::量子力学" 和 "提及::量子理论" → 合并为 "提及::量子力学/量子理论"
+   - 例如："解释::缸中之脑" 和 "解释::缸中之脑实验" → 合并为 "解释::缸中之脑"
+
+2. **动作类型不同但语义相关**：根据语义判断是否合并
+   - 例如："强调::主观体验" 和 "聚焦::主观体验层面" → 可合并为 "聚焦主观体验"
+   - 例如："列举::3个案例" 和 "给出::具体案例" → 可合并为 "列举/给出案例"
+
+3. **不合并的情况**：
+   - 具体对象完全不同："提及::量子力学" 和 "提及::相对论" → 不合并
+   - 动作语义相反："支持::某观点" 和 "反对::某观点" → 不合并
+   - 数量差异明显："列举::3个案例" 和 "列举::10个案例" → 不合并
+
+4. **类别命名规则**：
+   - 使用标准化格式：`动作类型::对象摘要`
+   - 对象摘要应简洁概括，如 "量子力学相关概念"、"具体案例和数据"
+   - 如果合并了多个动作类型，用"/"分隔，如 "提及/解释::哲学概念"
+
+**输出格式（JSON）：**
+```json
+{{
+  "categories": [
+    {{
+      "category_name": "提及::量子力学相关概念",
+      "tags": ["提及::量子力学", "提及::量子理论", "提及::波函数"],
+      "description": "涉及量子力学概念的标签"
+    }},
+    {{
+      "category_name": "列举::具体案例",
+      "tags": ["列举::3个案例", "给出::具体案例"],
+      "description": "列举或给出具体案例的标签"
+    }}
+  ]
+}}
+```
+
+请确保：
+1. 所有标签都必须被归类，不能遗漏
+2. 每个标签只能属于一个类别
+3. 类别描述简洁明了
+4. 输出必须是有效的JSON格式"""
+
         merge_result = self.llm.chat(
             self.analyzer_model, 
             [{"role": "user", "content": prompt}],
             model_config=model_config
         )
         
-        # 解析合并结果
+        # 解析JSON结果
         merged = {}
-        for line in merge_result.split('\n'):
-            if ':' in line:
-                parts = line.split(':', 1)
-                category = parts[0].strip()
-                tags = [t.strip() for t in parts[1].split(',')]
-                merged[category] = tags
+        try:
+            # 提取JSON部分
+            json_match = re.search(r'\{[\s\S]*\}', merge_result)
+            if json_match:
+                data = json.loads(json_match.group())
+                for cat in data.get('categories', []):
+                    category_name = cat.get('category_name', '')
+                    tags = cat.get('tags', [])
+                    if category_name and tags:
+                        merged[category_name] = tags
+        except json.JSONDecodeError as e:
+            print(f"解析合并结果失败: {e}")
+            # 回退：简单按动作类型分组
+            for tag in unique_tags:
+                if '::' in tag:
+                    action = tag.split('::')[0]
+                    category = f"{action}类"
+                    if category not in merged:
+                        merged[category] = []
+                    merged[category].append(tag)
         
         # 为每个结果添加合并后的标签映射
         for result in results:
+            result.merged_tags = merged
+            # 为每个回答创建标签到类别的映射
             for response in result.responses:
-                tag_mapping = {}
+                tag_to_category = {}
                 for tag in response.tags:
+                    # 标准化标签
+                    if '::' in tag:
+                        action, obj = tag.split('::', 1)
+                        std_action = action_synonyms.get(action, action)
+                        std_tag = f"{std_action}::{obj}"
+                    else:
+                        std_tag = tag
+                    
+                    # 查找所属类别
                     for category, tags in merged.items():
-                        if tag in tags:
-                            tag_mapping[tag] = category
+                        if std_tag in tags or tag in tags:
+                            tag_to_category[tag] = category
                             break
-                result.merged_tags = merged
+                
+                # 存储映射到response
+                if not hasattr(response, 'tag_categories'):
+                    response.tag_categories = {}
+                response.tag_categories = tag_to_category
         
         return merged
     
     def analyze_tag_correlation(self, results: list[QuestionResult],
                                 model_config: ModelConfig = None) -> dict:
-        """分析不同标签在不同回答之间的相关性"""
-        # 统计标签共现
-        tag_pairs = defaultdict(int)
+        """分析不同标签在不同回答之间的相关性，使用合并后的标签类别"""
+        
+        # 1. 收集原始标签统计
         tag_counts = defaultdict(int)
-        model_tags = defaultdict(set)
+        tag_by_model = defaultdict(lambda: defaultdict(int))  # model -> tag -> count
+        tag_by_question = defaultdict(lambda: defaultdict(list))  # question -> tag -> [models]
+        
+        # 2. 收集合并后的类别统计
+        category_counts = defaultdict(int)
+        category_by_model = defaultdict(lambda: defaultdict(int))  # model -> category -> count
+        category_cooccurrence = defaultdict(lambda: defaultdict(int))  # category1 -> category2 -> count
         
         for result in results:
+            question = result.question
+            merged_tags = result.merged_tags
+            
             for response in result.responses:
-                model_tags[response.model_name].update(response.tags)
-                for tag in response.tags:
-                    tag_counts[tag] += 1
-                
-                # 统计标签共现
+                model = response.model_name
                 tags = response.tags
-                for i in range(len(tags)):
-                    for j in range(i + 1, len(tags)):
-                        pair = tuple(sorted([tags[i], tags[j]]))
-                        tag_pairs[pair] += 1
+                
+                # 原始标签统计
+                for tag in tags:
+                    tag_counts[tag] += 1
+                    tag_by_model[model][tag] += 1
+                    tag_by_question[question][tag].append(model)
+                
+                # 合并后的类别统计
+                tag_categories = getattr(response, 'tag_categories', {})
+                categories_in_response = set()
+                
+                for tag, category in tag_categories.items():
+                    category_counts[category] += 1
+                    category_by_model[model][category] += 1
+                    categories_in_response.add(category)
+                
+                # 类别共现统计
+                categories_list = list(categories_in_response)
+                for i in range(len(categories_list)):
+                    for j in range(i + 1, len(categories_list)):
+                        cat1, cat2 = categories_list[i], categories_list[j]
+                        # 双向记录
+                        category_cooccurrence[cat1][cat2] += 1
+                        category_cooccurrence[cat2][cat1] += 1
         
-        # 用LLM深入分析相关性
-        # 将 tuple 键转换为字符串，以便 JSON 序列化
-        tag_pairs_serializable = {f"{k[0]} & {k[1]}": v for k, v in tag_pairs.items()}
+        # 3. 计算类别之间的关联强度（Jaccard相似度）
+        category_associations = {}
+        all_categories = list(category_counts.keys())
         
-        correlation_data = {
-            "tag_counts": dict(tag_counts),
-            "tag_pairs": tag_pairs_serializable,
-            "model_tags": {k: list(v) for k, v in model_tags.items()}
+        for i, cat1 in enumerate(all_categories):
+            for cat2 in all_categories[i+1:]:
+                cooccur = category_cooccurrence[cat1].get(cat2, 0)
+                if cooccur > 0:
+                    # Jaccard相似度
+                    union = category_counts[cat1] + category_counts[cat2] - cooccur
+                    similarity = cooccur / union if union > 0 else 0
+                    if similarity > 0.1:  # 只记录有一定关联的
+                        category_associations[f"{cat1} ↔ {cat2}"] = {
+                            "cooccurrence": cooccur,
+                            "similarity": round(similarity, 3)
+                        }
+        
+        # 4. 分析各模型的标签偏好特征
+        model_profiles = {}
+        for model, cats in category_by_model.items():
+            total = sum(cats.values())
+            if total > 0:
+                # 找出该模型最显著的特征
+                top_categories = sorted(cats.items(), key=lambda x: x[1], reverse=True)[:5]
+                model_profiles[model] = {
+                    "total_tags": total,
+                    "top_categories": [(cat, count, round(count/total, 3)) for cat, count in top_categories],
+                    "unique_strength": []  # 该模型独特的特征
+                }
+        
+        # 5. 找出各模型独特的标签特征（相比其他模型更常出现的）
+        for model in model_profiles:
+            model_cats = category_by_model[model]
+            model_total = sum(model_cats.values())
+            unique_strengths = []
+            
+            for cat, count in model_cats.items():
+                model_ratio = count / model_total if model_total > 0 else 0
+                
+                # 其他模型的平均比例
+                other_ratios = []
+                for other_model, other_cats in category_by_model.items():
+                    if other_model != model:
+                        other_total = sum(other_cats.values())
+                        if other_total > 0 and cat in other_cats:
+                            other_ratios.append(other_cats[cat] / other_total)
+                
+                if other_ratios:
+                    avg_other_ratio = sum(other_ratios) / len(other_ratios)
+                    # 如果该模型的比例明显高于其他模型
+                    if model_ratio > avg_other_ratio * 1.5:
+                        unique_strengths.append({
+                            "category": cat,
+                            "model_ratio": round(model_ratio, 3),
+                            "others_avg_ratio": round(avg_other_ratio, 3),
+                            "strength": round(model_ratio / avg_other_ratio, 2) if avg_other_ratio > 0 else float('inf')
+                        })
+            
+            model_profiles[model]["unique_strength"] = sorted(
+                unique_strengths, key=lambda x: x["strength"], reverse=True
+            )[:3]
+        
+        # 6. 构建LLM分析的输入数据
+        analysis_data = {
+            "category_counts": dict(sorted(category_counts.items(), key=lambda x: x[1], reverse=True)),
+            "category_associations": dict(sorted(category_associations.items(), 
+                                                key=lambda x: x[1]["similarity"], reverse=True)[:10]),
+            "model_profiles": model_profiles,
+            "total_questions": len(results),
+            "total_responses": sum(len(r.responses) for r in results)
         }
         
-        prompt = f"""请分析以下标签数据，找出标签之间的相关性和模式。
+        # 7. 用LLM进行深度解读
+        prompt = f"""请深入分析以下标签相关性数据，找出有意义的模式和洞察。
 
-标签出现次数：{json.dumps(correlation_data['tag_counts'], ensure_ascii=False, indent=2)}
+**数据概览：**
+- 总问题数：{analysis_data['total_questions']}
+- 总回答数：{analysis_data['total_responses']}
+- 标签类别数：{len(analysis_data['category_counts'])}
 
-标签共现次数（同一回答中同时出现的标签）：{json.dumps(correlation_data['tag_pairs'], ensure_ascii=False, indent=2)}
+**标签类别出现频次（前15）：**
+{json.dumps(list(analysis_data['category_counts'].items())[:15], ensure_ascii=False, indent=2)}
 
-各模型常见标签：{json.dumps(correlation_data['model_tags'], ensure_ascii=False, indent=2)}
+**标签类别关联度（前10组）：**
+{json.dumps(analysis_data['category_associations'], ensure_ascii=False, indent=2)}
 
-请分析：
-1. 哪些标签经常一起出现？说明什么特点？
-2. 不同模型的标签有什么偏好？
-3. 标签之间有什么潜在的相关性或因果关系？
+**各模型标签特征画像：**
+{json.dumps(analysis_data['model_profiles'], ensure_ascii=False, indent=2)}
 
-请输出JSON格式的分析结果："""
-        
+---
+
+**请分析以下方面：**
+
+1. **标签分布特征**
+   - 哪些类别的标签最常见？反映了什么？
+   - 有没有明显缺失的类别？
+
+2. **类别关联模式**
+   - 哪些标签类别经常一起出现？说明了什么？
+   - 有没有意外的关联？如何解释？
+
+3. **模型差异分析**
+   - 各模型的标签特征有何不同？
+   - 哪个模型最独特？独特在哪里？
+   - 哪些模型比较相似？
+
+4. **回答质量洞察**
+   - 基于标签分布，哪个模型的回答更全面？
+   - 哪个模型更注重细节？
+
+5. **潜在改进建议**
+   - 标签体系是否需要调整？
+   - 有没有遗漏的重要维度？
+
+**输出格式（JSON）：**
+```json
+{{
+  "distribution_insights": "标签分布特征的洞察...",
+  "association_patterns": "类别关联模式的发现...",
+  "model_differences": {{
+    "模型A": "特征描述...",
+    "模型B": "特征描述..."
+  }},
+  "quality_assessment": "回答质量评估...",
+  "recommendations": ["建议1", "建议2", ...]
+}}
+```"""
+
         analysis = self.llm.chat(
             self.analyzer_model, 
             [{"role": "user", "content": prompt}],
             model_config=model_config
         )
         
-        # 尝试解析JSON
+        # 8. 解析LLM分析结果
         try:
-            # 提取JSON部分
             json_match = re.search(r'\{[\s\S]*\}', analysis)
             if json_match:
-                correlation_analysis = json.loads(json_match.group())
+                llm_insights = json.loads(json_match.group())
             else:
-                correlation_analysis = {"raw_analysis": analysis}
+                llm_insights = {"raw_analysis": analysis}
         except json.JSONDecodeError:
-            correlation_analysis = {"raw_analysis": analysis}
+            llm_insights = {"raw_analysis": analysis}
+        
+        # 9. 构建最终结果
+        correlation_result = {
+            "statistics": {
+                "tag_counts": dict(tag_counts),
+                "category_counts": dict(category_counts),
+                "category_by_model": {k: dict(v) for k, v in category_by_model.items()},
+            },
+            "associations": {
+                "category_cooccurrence": {k: dict(v) for k, v in category_cooccurrence.items()},
+                "category_similarity": category_associations,
+            },
+            "model_profiles": model_profiles,
+            "insights": llm_insights,
+            "raw_analysis": analysis
+        }
         
         # 更新结果
         for result in results:
-            result.tag_correlation = correlation_analysis
+            result.tag_correlation = correlation_result
         
-        return correlation_analysis
+        return correlation_result
     
     def run_full_analysis(self, topic: str = None, 
                          models: Union[list[str], list[ModelConfig]] = None,
@@ -1219,24 +1633,38 @@ class LLMDiffAnalyzer:
             result.diff_summary = diff_summary
             print(f"  差异摘要: {diff_summary[:100]}...")
         
-        # 4. 打标签
-        print("\n[4/6] 为回答打标签...")
+        # 4. 打标签（细粒度、细节导向）
+        print("\n[4/6] 为回答打标签（细粒度、细节导向）...")
+        total_tags = 0
         for result in self.results:
             self.tag_responses(
                 result.question, result.responses,
                 model_config=self.analyzer_config
             )
             for r in result.responses:
-                print(f"  {r.model_name} 标签: {', '.join(r.tags[:5])}")
+                total_tags += len(r.tags)
+                print(f"  {r.model_name} 标签({len(r.tags)}个): {', '.join(r.tags[:3])}...")
+        print(f"  共生成 {total_tags} 个细粒度标签")
         
-        # 5. 合并相似标签
-        print("\n[5/6] 合并相似标签...")
+        # 5. 合并同义词/近义词标签
+        print("\n[5/6] 合并同义词/近义词标签...")
         merged = self.merge_similar_tags(self.results, model_config=self.analyzer_config)
-        print(f"合并为 {len(merged)} 个类别")
+        print(f"  原始标签类别: {len(set(tag for r in self.results for resp in r.responses for tag in resp.tags))} 个")
+        print(f"  合并后类别: {len(merged)} 个")
+        print(f"  压缩率: {round((1 - len(merged)/max(1, len(set(tag for r in self.results for resp in r.responses for tag in resp.tags))))*100, 1)}%")
         
-        # 6. 分析相关性
-        print("\n[6/6] 分析标签相关性...")
+        # 6. 分析标签相关性（基于合并后的类别）
+        print("\n[6/6] 分析标签相关性（基于合并后类别）...")
         correlation = self.analyze_tag_correlation(self.results, model_config=self.analyzer_config)
+        
+        # 输出关键洞察
+        if 'model_profiles' in correlation:
+            print("\n  模型特征画像:")
+            for model, profile in correlation['model_profiles'].items():
+                unique = profile.get('unique_strength', [])
+                if unique:
+                    top_unique = unique[0] if unique else {}
+                    print(f"    {model}: 最独特特征 - {top_unique.get('category', 'N/A')} (强度: {top_unique.get('strength', 'N/A')})")
         
         print("\n=== 分析完成 ===")
         return self.results
@@ -1297,6 +1725,7 @@ class LLMDiffAnalyzer:
         report.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         report.append("---\n\n")
         
+        # 问题详情
         for i, result in enumerate(self.results, 1):
             report.append(f"## 问题 {i}\n\n")
             report.append(f"**{result.question}**\n\n")
@@ -1305,22 +1734,97 @@ class LLMDiffAnalyzer:
             for response in result.responses:
                 report.append(f"#### {response.model_name}\n\n")
                 report.append(f"**关键词**: {', '.join(response.diff_keywords)}\n\n")
-                report.append(f"**标签**: {', '.join(response.tags)}\n\n")
-                report.append(f"**回答**:\n\n{response.response[:500]}...\n\n")
+                
+                # 显示原始标签和合并后的类别
+                report.append(f"**细粒度标签** ({len(response.tags)}个):\n")
+                for tag in response.tags[:8]:  # 显示前8个
+                    report.append(f"- {tag}\n")
+                if len(response.tags) > 8:
+                    report.append(f"- ... 等{len(response.tags)}个标签\n")
+                report.append("\n")
+                
+                # 显示标签对应的类别
+                if hasattr(response, 'tag_categories') and response.tag_categories:
+                    report.append(f"**标签类别映射**:\n")
+                    for tag, category in list(response.tag_categories.items())[:5]:
+                        report.append(f"- `{tag}` → `{category}`\n")
+                    report.append("\n")
+                
+                report.append(f"**回答摘要**:\n\n{response.response[:500]}...\n\n")
             
             report.append(f"### 差异摘要\n\n{result.diff_summary}\n\n")
             report.append("---\n\n")
+        
+        # 标签合并结果
+        if self.results and self.results[0].merged_tags:
+            report.append("## 标签合并结果\n\n")
+            merged = self.results[0].merged_tags
+            report.append(f"合并为 **{len(merged)}** 个标签类别:\n\n")
+            for category, tags in sorted(merged.items()):
+                report.append(f"### {category}\n")
+                report.append(f"包含标签: {', '.join(tags[:5])}")
+                if len(tags) > 5:
+                    report.append(f" ... 等{len(tags)}个")
+                report.append("\n\n")
         
         # 标签相关性分析
         if self.results and self.results[0].tag_correlation:
             report.append("## 标签相关性分析\n\n")
             correlation = self.results[0].tag_correlation
-            if "raw_analysis" in correlation:
-                report.append(correlation["raw_analysis"])
-            else:
-                report.append("```json\n")
-                report.append(json.dumps(correlation, ensure_ascii=False, indent=2))
-                report.append("\n```\n")
+            
+            # 模型特征画像
+            if 'model_profiles' in correlation:
+                report.append("### 模型特征画像\n\n")
+                for model, profile in correlation['model_profiles'].items():
+                    report.append(f"#### {model}\n\n")
+                    report.append(f"- 总标签数: {profile.get('total_tags', 0)}\n")
+                    
+                    top_cats = profile.get('top_categories', [])
+                    if top_cats:
+                        report.append(f"- 主要特征: {', '.join([f'{cat}({ratio:.0%})' for cat, _, ratio in top_cats[:3]])}\n")
+                    
+                    unique = profile.get('unique_strength', [])
+                    if unique:
+                        report.append(f"- 独特优势: ")
+                        for u in unique[:2]:
+                            report.append(f"{u['category']}(强度{u['strength']:.1f}x) ")
+                        report.append("\n")
+                    report.append("\n")
+            
+            # 类别关联
+            if 'associations' in correlation and correlation['associations'].get('category_similarity'):
+                report.append("### 类别关联分析\n\n")
+                associations = correlation['associations']['category_similarity']
+                for pair, data in list(associations.items())[:10]:
+                    report.append(f"- **{pair}**: 共现{data['cooccurrence']}次, 相似度{data['similarity']:.2f}\n")
+                report.append("\n")
+            
+            # LLM洞察
+            if 'insights' in correlation:
+                insights = correlation['insights']
+                report.append("### 深度洞察\n\n")
+                
+                if 'distribution_insights' in insights:
+                    report.append(f"**分布特征**: {insights['distribution_insights']}\n\n")
+                if 'association_patterns' in insights:
+                    report.append(f"**关联模式**: {insights['association_patterns']}\n\n")
+                if 'model_differences' in insights:
+                    report.append("**模型差异**:\n")
+                    for model, diff in insights['model_differences'].items():
+                        report.append(f"- {model}: {diff}\n")
+                    report.append("\n")
+                if 'quality_assessment' in insights:
+                    report.append(f"**质量评估**: {insights['quality_assessment']}\n\n")
+                if 'recommendations' in insights:
+                    report.append("**改进建议**:\n")
+                    for rec in insights['recommendations']:
+                        report.append(f"- {rec}\n")
+                    report.append("\n")
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.writelines(report)
+        
+        print(f"报告已保存到: {filepath}")
         
         with open(filepath, 'w', encoding='utf-8') as f:
             f.writelines(report)
@@ -1334,7 +1838,8 @@ def create_model_config_from_dict(model_dict: dict) -> ModelConfig:
         model_name=model_dict.get('model_name', ''),
         api_type=model_dict.get('api_type', 'openai'),
         api_key=model_dict.get('api_key', ''),
-        base_url=model_dict.get('base_url', '')
+        base_url=model_dict.get('base_url', ''),
+        timeout=float(model_dict.get('timeout', 120.0))
     )
 
 
@@ -1448,7 +1953,8 @@ def main():
                 model_name=m.get('model_name', m.get('name', '')),
                 api_type=m.get('api_type', 'openai'),
                 api_key=m.get('api_key', ''),
-                base_url=m.get('base_url', '')
+                base_url=m.get('base_url', ''),
+                timeout=float(m.get('timeout', 120.0))
             )
             # 保存友好名称用于显示
             mc.display_name = m.get('name', mc.model_name)
