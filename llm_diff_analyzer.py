@@ -2,15 +2,20 @@
 """
 LLM差异分析器
 用于生成问题、收集不同模型的回答、分析差异、打标签并分析相关性
+支持长期持续运行和问题去重
 """
 
 import json
 import os
 import re
+import time
+import signal
+import hashlib
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
-from typing import Any, Union
+from datetime import datetime, timedelta
+from typing import Any, Union, Optional, List, Dict
 from pathlib import Path
 
 # 结果输出目录
@@ -151,6 +156,453 @@ class QuestionResult:
     tag_correlation: dict = field(default_factory=dict)
 
 
+class QuestionHistory:
+    """问题历史管理类 - 用于追踪已生成的问题并避免重复"""
+    
+    def __init__(self, history_file: str = None, similarity_threshold: float = 0.85):
+        """
+        初始化问题历史管理器
+        
+        Args:
+            history_file: 历史记录文件路径
+            similarity_threshold: 相似度阈值（0-1），超过此值视为重复
+        """
+        self.history_file = history_file or os.path.join(OUTPUT_DIR, "question_history.json")
+        self.similarity_threshold = similarity_threshold
+        self.questions: Dict[str, dict] = {}  # question_hash -> {question, timestamp, count}
+        self.question_hashes: set = set()  # 快速查找用
+        self._lock = threading.Lock()
+        self._load_history()
+    
+    def _load_history(self):
+        """加载历史记录"""
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.questions = data.get('questions', {})
+                    self.question_hashes = set(self.questions.keys())
+                print(f"已加载 {len(self.questions)} 条历史问题记录")
+            except Exception as e:
+                print(f"加载历史记录失败: {e}")
+                self.questions = {}
+                self.question_hashes = set()
+    
+    def _save_history(self):
+        """保存历史记录"""
+        os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
+        with self._lock:
+            try:
+                data = {
+                    'version': 1,
+                    'last_updated': datetime.now().isoformat(),
+                    'total_questions': len(self.questions),
+                    'questions': self.questions
+                }
+                with open(self.history_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"保存历史记录失败: {e}")
+    
+    def _normalize_question(self, question: str) -> str:
+        """标准化问题文本（去除空格、标点等）"""
+        # 去除首尾空格
+        q = question.strip()
+        # 统一标点符号
+        q = re.sub(r'[？?！!。，,.]', '', q)
+        # 去除多余空格
+        q = re.sub(r'\s+', '', q)
+        return q.lower()
+    
+    def _compute_hash(self, question: str) -> str:
+        """计算问题的哈希值"""
+        normalized = self._normalize_question(question)
+        return hashlib.md5(normalized.encode('utf-8')).hexdigest()
+    
+    def _compute_similarity(self, q1: str, q2: str) -> float:
+        """
+        计算两个问题的相似度（基于字符级别的Jaccard相似度）
+        
+        Args:
+            q1, q2: 两个问题文本
+        
+        Returns:
+            相似度值 0-1
+        """
+        # 标准化
+        n1 = self._normalize_question(q1)
+        n2 = self._normalize_question(q2)
+        
+        # 字符集合
+        set1 = set(n1)
+        set2 = set(n2)
+        
+        # Jaccard 相似度
+        if not set1 or not set2:
+            return 0.0
+        
+        intersection = len(set1 & set2)
+        union = len(set1 | set2)
+        
+        return intersection / union if union > 0 else 0.0
+    
+    def is_duplicate(self, question: str) -> tuple[bool, Optional[str]]:
+        """
+        检查问题是否重复
+        
+        Args:
+            question: 待检查的问题
+        
+        Returns:
+            (是否重复, 相似问题的哈希值)
+        """
+        q_hash = self._compute_hash(question)
+        
+        with self._lock:
+            # 精确匹配
+            if q_hash in self.question_hashes:
+                return True, q_hash
+            
+            # 相似度检查（对于新问题，检查是否与历史问题相似）
+            normalized_q = self._normalize_question(question)
+            
+            # 如果问题太短（少于5个字符），不做相似度检查
+            if len(normalized_q) < 5:
+                return False, None
+            
+            # 检查与历史问题的相似度
+            for h, data in self.questions.items():
+                hist_q = data.get('question', '')
+                similarity = self._compute_similarity(question, hist_q)
+                
+                if similarity >= self.similarity_threshold:
+                    return True, h
+        
+        return False, None
+    
+    def add_question(self, question: str) -> bool:
+        """
+        添加问题到历史记录
+        
+        Args:
+            question: 问题文本
+        
+        Returns:
+            是否成功添加（如果重复则返回False）
+        """
+        is_dup, _ = self.is_duplicate(question)
+        if is_dup:
+            return False
+        
+        q_hash = self._compute_hash(question)
+        
+        with self._lock:
+            self.questions[q_hash] = {
+                'question': question,
+                'timestamp': datetime.now().isoformat(),
+                'count': 1
+            }
+            self.question_hashes.add(q_hash)
+        
+        # 异步保存
+        threading.Thread(target=self._save_history, daemon=True).start()
+        return True
+    
+    def add_questions(self, questions: List[str]) -> List[str]:
+        """
+        批量添加问题，返回实际添加成功的问题列表（去重后）
+        
+        Args:
+            questions: 问题列表
+        
+        Returns:
+            成功添加的问题列表
+        """
+        added = []
+        for q in questions:
+            if self.add_question(q):
+                added.append(q)
+        return added
+    
+    def filter_duplicates(self, questions: List[str]) -> List[str]:
+        """
+        过滤掉重复的问题
+        
+        Args:
+            questions: 问题列表
+        
+        Returns:
+            去重后的问题列表
+        """
+        unique = []
+        seen_hashes = set()
+        
+        for q in questions:
+            q_hash = self._compute_hash(q)
+            
+            # 检查是否在本次列表中已出现
+            if q_hash in seen_hashes:
+                continue
+            
+            # 检查是否在历史记录中
+            is_dup, _ = self.is_duplicate(q)
+            if not is_dup:
+                unique.append(q)
+                seen_hashes.add(q_hash)
+        
+        return unique
+    
+    def get_stats(self) -> dict:
+        """获取统计信息"""
+        with self._lock:
+            return {
+                'total_questions': len(self.questions),
+                'history_file': self.history_file,
+                'similarity_threshold': self.similarity_threshold
+            }
+    
+    def archive_old_questions(self, days: int = 30):
+        """
+        归档旧问题（将超过指定天数的问题移到归档文件）
+        
+        Args:
+            days: 保留最近多少天的问题
+        """
+        cutoff_date = datetime.now() - timedelta(days=days)
+        archive_file = self.history_file.replace('.json', f'_archive_{datetime.now().strftime("%Y%m%d")}.json')
+        
+        with self._lock:
+            to_archive = {}
+            to_keep = {}
+            
+            for h, data in self.questions.items():
+                try:
+                    q_time = datetime.fromisoformat(data.get('timestamp', ''))
+                    if q_time < cutoff_date:
+                        to_archive[h] = data
+                    else:
+                        to_keep[h] = data
+                except:
+                    to_keep[h] = data
+            
+            if to_archive:
+                # 保存归档
+                try:
+                    with open(archive_file, 'w', encoding='utf-8') as f:
+                        json.dump({
+                            'archived_at': datetime.now().isoformat(),
+                            'questions': to_archive
+                        }, f, ensure_ascii=False, indent=2)
+                    print(f"已归档 {len(to_archive)} 条旧问题到 {archive_file}")
+                except Exception as e:
+                    print(f"归档失败: {e}")
+                    return
+                
+                # 更新当前记录
+                self.questions = to_keep
+                self.question_hashes = set(to_keep.keys())
+                self._save_history()
+
+
+class ContinuousRunner:
+    """持续运行管理器 - 支持长期运行和状态管理"""
+    
+    def __init__(self, history: QuestionHistory = None):
+        """
+        初始化持续运行管理器
+        
+        Args:
+            history: 问题历史管理器实例
+        """
+        self.history = history or QuestionHistory()
+        self.state_file = os.path.join(OUTPUT_DIR, "runner_state.json")
+        self.running = False
+        self.paused = False
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._setup_signal_handlers()
+    
+    def _setup_signal_handlers(self):
+        """设置信号处理器（优雅退出）"""
+        def signal_handler(signum, frame):
+            print(f"\n收到信号 {signum}，正在优雅停止...")
+            self.stop()
+        
+        # 捕获 SIGINT (Ctrl+C) 和 SIGTERM
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+    
+    def _load_state(self) -> dict:
+        """加载运行状态"""
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                pass
+        return {
+            'start_time': None,
+            'total_runs': 0,
+            'total_questions': 0,
+            'last_run': None,
+            'errors': 0
+        }
+    
+    def _save_state(self, state: dict):
+        """保存运行状态"""
+        os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+        try:
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存状态失败: {e}")
+    
+    def stop(self):
+        """停止运行"""
+        self.running = False
+        self._stop_event.set()
+        self._pause_event.set()  # 如果暂停中，也唤醒以便退出
+    
+    def pause(self):
+        """暂停运行"""
+        self.paused = True
+        self._pause_event.clear()
+        print("运行已暂停，发送 SIGCONT 或调用 resume() 继续")
+    
+    def resume(self):
+        """恢复运行"""
+        self.paused = False
+        self._pause_event.set()
+        print("运行已恢复")
+    
+    def wait_if_paused(self):
+        """如果暂停则等待"""
+        while self.paused and self.running:
+            self._pause_event.wait(timeout=1)
+    
+    def run_loop(self, 
+                 analyzer: 'LLMDiffAnalyzer',
+                 models: List[ModelConfig],
+                 question_count: int = 5,
+                 interval_minutes: float = 30,
+                 max_runs: int = None,
+                 generator_model: str = "gpt-4",
+                 generator_config: ModelConfig = None,
+                 use_example_style: bool = True,
+                 example_questions: List[str] = None,
+                 on_complete: callable = None):
+        """
+        持续运行循环
+        
+        Args:
+            analyzer: 分析器实例
+            models: 模型配置列表
+            question_count: 每次生成的问题数量
+            interval_minutes: 运行间隔（分钟）
+            max_runs: 最大运行次数（None表示无限）
+            generator_model: 问题生成模型
+            generator_config: 问题生成模型配置
+            use_example_style: 是否使用示例问题风格
+            example_questions: 自定义示例问题
+            on_complete: 每次完成后的回调函数
+        """
+        self.running = True
+        state = self._load_state()
+        
+        if state['start_time'] is None:
+            state['start_time'] = datetime.now().isoformat()
+        
+        run_count = 0
+        interval_seconds = interval_minutes * 60
+        
+        print(f"\n{'='*60}")
+        print(f"持续运行模式启动")
+        print(f"运行间隔: {interval_minutes} 分钟")
+        print(f"每次问题数: {question_count}")
+        print(f"最大运行次数: {'无限' if max_runs is None else max_runs}")
+        print(f"历史问题数: {self.history.get_stats()['total_questions']}")
+        print(f"{'='*60}\n")
+        
+        try:
+            while self.running and (max_runs is None or run_count < max_runs):
+                run_count += 1
+                
+                # 检查暂停
+                self.wait_if_paused()
+                if not self.running:
+                    break
+                
+                print(f"\n{'─'*60}")
+                print(f"第 {run_count} 次运行 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"{'─'*60}")
+                
+                try:
+                    # 运行分析
+                    results = analyzer.run_full_analysis(
+                        topic=None,
+                        models=models,
+                        question_count=question_count,
+                        generator_model=generator_model,
+                        generator_config=generator_config,
+                        use_example_style=use_example_style,
+                        example_questions=example_questions
+                    )
+                    
+                    # 记录问题到历史
+                    actual_questions = [r.question for r in results]
+                    new_questions = self.history.add_questions(actual_questions)
+                    
+                    # 保存结果
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    analyzer.save_results(f"analysis_results_{timestamp}.json")
+                    analyzer.generate_report(f"analysis_report_{timestamp}.md")
+                    
+                    # 更新状态
+                    state['total_runs'] += 1
+                    state['total_questions'] += len(new_questions)
+                    state['last_run'] = datetime.now().isoformat()
+                    self._save_state(state)
+                    
+                    print(f"\n本次新增问题: {len(new_questions)}/{len(actual_questions)}")
+                    print(f"累计运行次数: {state['total_runs']}")
+                    print(f"累计问题数: {state['total_questions']}")
+                    
+                    # 回调
+                    if on_complete:
+                        on_complete(results, state)
+                    
+                except Exception as e:
+                    print(f"运行出错: {e}")
+                    state['errors'] += 1
+                    self._save_state(state)
+                
+                # 等待下次运行
+                if self.running and (max_runs is None or run_count < max_runs):
+                    print(f"\n等待 {interval_minutes} 分钟后进行下次运行...")
+                    print("(按 Ctrl+C 停止)")
+                    
+                    # 分段等待以支持及时响应停止信号
+                    for _ in range(int(interval_seconds)):
+                        if not self.running:
+                            break
+                        self.wait_if_paused()
+                        if self._stop_event.wait(timeout=1):
+                            break
+        
+        except KeyboardInterrupt:
+            print("\n用户中断，正在停止...")
+        
+        finally:
+            self.running = False
+            self._save_state(state)
+            print(f"\n{'='*60}")
+            print(f"运行结束")
+            print(f"总运行次数: {state['total_runs']}")
+            print(f"总问题数: {state['total_questions']}")
+            print(f"错误次数: {state['errors']}")
+            print(f"{'='*60}")
+
+
 class LLMClient:
     """LLM客户端封装 - 支持多模型独立配置"""
     
@@ -275,7 +727,8 @@ class LLMDiffAnalyzer:
     """LLM差异分析器主类"""
     
     def __init__(self, llm_client: LLMClient, analyzer_model: str = "gpt-4",
-                 analyzer_config: ModelConfig = None):
+                 analyzer_config: ModelConfig = None,
+                 question_history: QuestionHistory = None):
         """
         初始化分析器
         
@@ -283,36 +736,80 @@ class LLMDiffAnalyzer:
             llm_client: LLM客户端实例
             analyzer_model: 分析器使用的模型名称（向后兼容）
             analyzer_config: 分析器模型的完整配置（可选，用于独立配置分析器）
+            question_history: 问题历史管理器实例（可选，用于去重）
         """
         self.llm = llm_client
         self.analyzer_model = analyzer_model
         self.analyzer_config = analyzer_config
+        self.question_history = question_history
         self.results: list[QuestionResult] = []
     
     def generate_questions(self, topic: str, count: int = 5, 
                           generator_model: str = "gpt-4",
-                          generator_config: ModelConfig = None) -> list[str]:
-        """用AI生成问题"""
-        prompt = f"""请生成{count}个关于"{topic}"的深度问题。
+                          generator_config: ModelConfig = None,
+                          exclude_duplicates: bool = True,
+                          max_attempts: int = 3) -> list[str]:
+        """
+        用AI生成问题
+        
+        Args:
+            topic: 主题
+            count: 生成数量
+            generator_model: 生成模型
+            generator_config: 生成模型配置
+            exclude_duplicates: 是否排除重复问题
+            max_attempts: 最大尝试次数（用于获取足够的不重复问题）
+        
+        Returns:
+            问题列表
+        """
+        all_questions = []
+        attempts = 0
+        
+        while len(all_questions) < count and attempts < max_attempts:
+            attempts += 1
+            remaining = count - len(all_questions)
+            
+            # 如果需要更多问题，提示生成更多
+            generate_count = remaining + 5  # 多生成一些以防重复
+            
+            prompt = f"""请生成{generate_count}个关于"{topic}"的深度问题。
 要求：
 1. 问题应该有深度，需要分析和思考
 2. 问题之间要有差异性，覆盖不同角度
 3. 每个问题一行，不要编号
+4. 不要生成已有类似问题
 
 请直接输出问题，每行一个："""
+            
+            response = self.llm.chat(
+                generator_model, 
+                [{"role": "user", "content": prompt}],
+                model_config=generator_config
+            )
+            questions = [q.strip() for q in response.strip().split('\n') if q.strip()]
+            # 过滤掉可能的编号前缀
+            questions = [re.sub(r'^\d+[\.\)、\s]+', '', q).strip() for q in questions]
+            
+            # 去重处理
+            if exclude_duplicates and self.question_history:
+                questions = self.question_history.filter_duplicates(questions)
+            
+            # 添加到结果
+            for q in questions:
+                if q not in all_questions:
+                    all_questions.append(q)
+                if len(all_questions) >= count:
+                    break
         
-        response = self.llm.chat(
-            generator_model, 
-            [{"role": "user", "content": prompt}],
-            model_config=generator_config
-        )
-        questions = [q.strip() for q in response.strip().split('\n') if q.strip()]
-        return questions[:count]
+        return all_questions[:count]
     
     def generate_similar_questions(self, count: int = 5,
                                    generator_model: str = "gpt-4",
                                    generator_config: ModelConfig = None,
-                                   example_questions: list[str] = None) -> list[str]:
+                                   example_questions: list[str] = None,
+                                   exclude_duplicates: bool = True,
+                                   max_attempts: int = 3) -> list[str]:
         """
         根据示例问题生成类似风格的新问题
         
@@ -321,17 +818,29 @@ class LLMDiffAnalyzer:
             generator_model: 生成模型名称
             generator_config: 生成模型配置
             example_questions: 自定义示例问题列表，为None则使用默认示例
+            exclude_duplicates: 是否排除重复问题
+            max_attempts: 最大尝试次数
         
         Returns:
             生成的新问题列表
         """
         examples = example_questions if example_questions else EXAMPLE_QUESTIONS
         
-        # 随机选择一些示例作为参考
-        import random
-        sample_examples = random.sample(examples, min(15, len(examples)))
+        all_questions = []
+        attempts = 0
         
-        prompt = f"""以下是{len(sample_examples)}个问题示例，请仔细分析这些问题的风格特点，然后生成{count}个风格类似的新问题。
+        while len(all_questions) < count and attempts < max_attempts:
+            attempts += 1
+            remaining = count - len(all_questions)
+            
+            # 随机选择一些示例作为参考
+            import random
+            sample_examples = random.sample(examples, min(15, len(examples)))
+            
+            # 如果需要更多问题，生成更多
+            generate_count = remaining + 10  # 多生成一些以防重复
+            
+            prompt = f"""以下是{len(sample_examples)}个问题示例，请仔细分析这些问题的风格特点，然后生成{generate_count}个风格类似的新问题。
 
 示例问题：
 {chr(10).join(f'{i+1}. {q}' for i, q in enumerate(sample_examples))}
@@ -347,7 +856,7 @@ class LLMDiffAnalyzer:
 - 问题可能涉及跨代比较（00后、50后等）
 - 问题可能涉及抽象数学概念（群论、域论、函子等）
 
-请生成{count}个新问题，要求：
+请生成{generate_count}个新问题，要求：
 1. 保持类似的风格和语调
 2. 覆盖不同领域（数学、科学、社会、文化等）
 3. 问题应该有趣、有深度、引人思考
@@ -355,16 +864,28 @@ class LLMDiffAnalyzer:
 5. 每个问题一行，不要编号
 
 请直接输出问题，每行一个："""
+            
+            response = self.llm.chat(
+                generator_model, 
+                [{"role": "user", "content": prompt}],
+                model_config=generator_config
+            )
+            questions = [q.strip() for q in response.strip().split('\n') if q.strip()]
+            # 过滤掉可能的编号前缀
+            questions = [re.sub(r'^\d+[\.\)、\s]+', '', q).strip() for q in questions]
+            
+            # 去重处理
+            if exclude_duplicates and self.question_history:
+                questions = self.question_history.filter_duplicates(questions)
+            
+            # 添加到结果（确保不重复）
+            for q in questions:
+                if q not in all_questions:
+                    all_questions.append(q)
+                if len(all_questions) >= count:
+                    break
         
-        response = self.llm.chat(
-            generator_model, 
-            [{"role": "user", "content": prompt}],
-            model_config=generator_config
-        )
-        questions = [q.strip() for q in response.strip().split('\n') if q.strip()]
-        # 过滤掉可能的编号前缀
-        questions = [re.sub(r'^\d+[\.\)、\s]+', '', q).strip() for q in questions]
-        return questions[:count]
+        return all_questions[:count]
     
     def get_responses(self, question: str, models: Union[list[str], list[ModelConfig]]) -> list[ModelResponse]:
         """
@@ -384,16 +905,18 @@ class LLMDiffAnalyzer:
             if isinstance(model, ModelConfig):
                 # 新模式：使用独立的模型配置
                 model_name = model.model_name
+                # 使用友好名称用于显示
+                display_name = getattr(model, 'display_name', model_name)
                 try:
                     answer = self.llm.chat(
                         model.model_name, 
                         [{"role": "user", "content": question}],
                         model_config=model
                     )
-                    responses.append(ModelResponse(model_name=model_name, response=answer))
+                    responses.append(ModelResponse(model_name=display_name, response=answer))
                 except Exception as e:
-                    print(f"模型 {model_name} 回答失败: {e}")
-                    responses.append(ModelResponse(model_name=model_name, response=f"[错误: {e}]"))
+                    print(f"模型 {display_name} 回答失败: {e}")
+                    responses.append(ModelResponse(model_name=display_name, response=f"[错误: {e}]"))
             else:
                 # 向后兼容：字符串模型名，使用默认客户端配置
                 model_name = model
@@ -568,9 +1091,12 @@ class LLMDiffAnalyzer:
                         tag_pairs[pair] += 1
         
         # 用LLM深入分析相关性
+        # 将 tuple 键转换为字符串，以便 JSON 序列化
+        tag_pairs_serializable = {f"{k[0]} & {k[1]}": v for k, v in tag_pairs.items()}
+        
         correlation_data = {
             "tag_counts": dict(tag_counts),
-            "tag_pairs": dict(tag_pairs),
+            "tag_pairs": tag_pairs_serializable,
             "model_tags": {k: list(v) for k, v in model_tags.items()}
         }
         
@@ -618,7 +1144,8 @@ class LLMDiffAnalyzer:
                          generator_model: str = "gpt-4",
                          generator_config: ModelConfig = None,
                          use_example_style: bool = False,
-                         example_questions: list[str] = None) -> list[QuestionResult]:
+                         example_questions: list[str] = None,
+                         exclude_duplicates: bool = True) -> list[QuestionResult]:
         """
         运行完整分析流程
         
@@ -632,6 +1159,7 @@ class LLMDiffAnalyzer:
             generator_config: 问题生成模型的独立配置
             use_example_style: 是否使用示例问题风格生成问题
             example_questions: 自定义示例问题列表
+            exclude_duplicates: 是否排除重复问题
         
         Returns:
             分析结果列表
@@ -651,15 +1179,27 @@ class LLMDiffAnalyzer:
                 count=question_count,
                 generator_model=generator_model,
                 generator_config=generator_config,
-                example_questions=example_questions
+                example_questions=example_questions,
+                exclude_duplicates=exclude_duplicates
             )
         else:
             questions = self.generate_questions(
                 topic, question_count, 
                 generator_model=generator_model,
-                generator_config=generator_config
+                generator_config=generator_config,
+                exclude_duplicates=exclude_duplicates
             )
-        print(f"生成了 {len(questions)} 个问题")
+        
+        if not questions:
+            print("警告: 没有生成新的不重复问题")
+            return []
+        
+        print(f"生成了 {len(questions)} 个新问题（已去重）")
+        
+        # 将问题添加到历史记录
+        if self.question_history:
+            added = self.question_history.add_questions(questions)
+            print(f"已记录 {len(added)} 个新问题到历史")
         
         # 2. 收集回答
         print("\n[2/6] 收集各模型回答...")
@@ -815,6 +1355,19 @@ def main():
                         help='配置文件路径（默认: config.yaml）')
     parser.add_argument('--list-models', action='store_true',
                         help='列出配置中的模型并退出')
+    # 持续运行相关参数
+    parser.add_argument('--continuous', action='store_true',
+                        help='启用持续运行模式')
+    parser.add_argument('--interval', type=float, default=30,
+                        help='持续运行间隔（分钟，默认: 30）')
+    parser.add_argument('--max-runs', type=int, default=None,
+                        help='最大运行次数（不指定则无限运行）')
+    parser.add_argument('--similarity-threshold', type=float, default=0.85,
+                        help='问题相似度阈值（0-1，默认: 0.85）')
+    parser.add_argument('--history-file', type=str, default=None,
+                        help='问题历史文件路径')
+    parser.add_argument('--archive-days', type=int, default=365,
+                        help='归档超过多少天的问题（默认: 365，即不归档）')
     args = parser.parse_args()
     
     # 加载配置
@@ -828,6 +1381,7 @@ def main():
     
     # 获取分析配置
     analysis_config = config.get('analysis', {})
+    continuous_config = config.get('continuous', {})
     analyzer_dict = config.get('analyzer', {})
     generator_dict = config.get('generator', {})
     models_list = config.get('models', [])
@@ -835,6 +1389,12 @@ def main():
     # 命令行参数覆盖配置文件
     question_count = args.count if args.count is not None else analysis_config.get('question_count', 5)
     use_example_style = args.example_style if args.example_style is not None else analysis_config.get('use_example_style', True)
+    
+    # 持续运行配置
+    continuous_mode = args.continuous or continuous_config.get('enabled', False)
+    interval_minutes = args.interval if args.interval != 30 else continuous_config.get('interval_minutes', 30)
+    max_runs = args.max_runs if args.max_runs is not None else continuous_config.get('max_runs')
+    similarity_threshold = args.similarity_threshold if args.similarity_threshold != 0.85 else continuous_config.get('similarity_threshold', 0.85)
     
     # 列出模型模式
     if args.list_models:
@@ -851,6 +1411,17 @@ def main():
     analyzer_config = create_model_config_from_dict(analyzer_dict)
     generator_config = create_model_config_from_dict(generator_dict)
     
+    # 创建问题历史管理器
+    history_file = args.history_file or continuous_config.get('history_file')
+    question_history = QuestionHistory(
+        history_file=history_file,
+        similarity_threshold=similarity_threshold
+    )
+    
+    # 归档旧问题（如果需要）
+    if args.archive_days < 365:
+        question_history.archive_old_questions(days=args.archive_days)
+    
     # 创建客户端
     client_config = {
         'api_type': analyzer_dict.get('api_type', 'openai'),
@@ -863,20 +1434,24 @@ def main():
     analyzer = LLMDiffAnalyzer(
         llm_client=client,
         analyzer_model=analyzer_config.model_name,
-        analyzer_config=analyzer_config
+        analyzer_config=analyzer_config,
+        question_history=question_history
     )
     
     # 创建回答模型配置列表
     model_configs = []
     for m in models_list:
         if m.get('enabled', True):
-            model_name = m.get('name', m.get('model_name'))
+            # 使用 model_name 作为实际调用的模型名称
+            # name 只是友好名称，用于显示
             mc = ModelConfig(
-                model_name=model_name,
+                model_name=m.get('model_name', m.get('name', '')),
                 api_type=m.get('api_type', 'openai'),
                 api_key=m.get('api_key', ''),
                 base_url=m.get('base_url', '')
             )
+            # 保存友好名称用于显示
+            mc.display_name = m.get('name', mc.model_name)
             model_configs.append(mc)
     
     if not model_configs:
@@ -887,27 +1462,50 @@ def main():
     print("=== 模型配置信息 ===")
     print(f"分析模型: {analyzer_config.model_name}")
     print(f"问题生成模型: {generator_config.model_name}")
-    print(f"回答模型: {', '.join(m.model_name for m in model_configs)}")
+    print(f"回答模型: {', '.join(getattr(m, 'display_name', m.model_name) for m in model_configs)}")
     print(f"问题数量: {question_count}")
+    print(f"相似度阈值: {similarity_threshold}")
+    print(f"历史问题数: {question_history.get_stats()['total_questions']}")
     if use_example_style:
         print(f"问题生成模式: 示例问题风格")
     else:
         print(f"问题生成模式: 传统主题模式 - {args.topic or '人工智能与人类未来的关系'}")
+    
+    if continuous_mode:
+        print(f"\n持续运行模式: 启用")
+        print(f"运行间隔: {interval_minutes} 分钟")
+        print(f"最大运行次数: {'无限' if max_runs is None else max_runs}")
+    
     print()
     
-    results = analyzer.run_full_analysis(
-        topic=args.topic,
-        models=model_configs,
-        question_count=question_count,
-        generator_model=generator_config.model_name,
-        generator_config=generator_config,
-        use_example_style=use_example_style
-    )
-    
-    # 保存结果
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    analyzer.save_results(f"analysis_results_{timestamp}.json")
-    analyzer.generate_report(f"analysis_report_{timestamp}.md")
+    if continuous_mode:
+        # 持续运行模式
+        runner = ContinuousRunner(history=question_history)
+        runner.run_loop(
+            analyzer=analyzer,
+            models=model_configs,
+            question_count=question_count,
+            interval_minutes=interval_minutes,
+            max_runs=max_runs,
+            generator_model=generator_config.model_name,
+            generator_config=generator_config,
+            use_example_style=use_example_style
+        )
+    else:
+        # 单次运行模式
+        results = analyzer.run_full_analysis(
+            topic=args.topic,
+            models=model_configs,
+            question_count=question_count,
+            generator_model=generator_config.model_name,
+            generator_config=generator_config,
+            use_example_style=use_example_style
+        )
+        
+        # 保存结果
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        analyzer.save_results(f"analysis_results_{timestamp}.json")
+        analyzer.generate_report(f"analysis_report_{timestamp}.md")
 
 
 if __name__ == "__main__":

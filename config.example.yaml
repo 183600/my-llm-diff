@@ -17,54 +17,69 @@ generator:
   api_key: "${ROUTIN_API_KEY}"
   base_url: "https://api.routin.ai/v1"
 
-# 用于生成回答的模型列表
+# 用于生成回答的模型列表（全部使用 NVIDIA API）
+# 一个模型生成失败不影响其他模型生成回答
 models:
-  # NVIDIA 模型
-  - name: "NVIDIA-kimi"
-    model_name: "moonshotai/kimi-k2.5"
+  - name: "seed-oss-36b-instruct"
+    model_name: "seed-oss-36b-instruct"
     api_type: "openai"
-    # 从环境变量读取: NVIDIA_API_KEY_1
-    api_key: "${NVIDIA_API_KEY_1}"
+    # 从环境变量读取: NVIDIA_API_KEY
+    api_key: "${NVIDIA_API_KEY}"
     base_url: "https://integrate.api.nvidia.com/v1"
     enabled: true
 
-  # MODAL 模型
-  - name: "MODAL-GLM5"
-    model_name: "zai-org/GLM-5-FP8"
+  - name: "qwq-32b"
+    model_name: "qwq-32b"
     api_type: "openai"
-    # 从环境变量读取: MODAL_API_KEY_1
-    api_key: "${MODAL_API_KEY_1}"
-    base_url: "https://api.us-west-2.modal.direct/v1"
+    api_key: "${NVIDIA_API_KEY}"
+    base_url: "https://integrate.api.nvidia.com/v1"
     enabled: true
 
-  # IFLOW_CN 模型
-  - name: "IFLOW_CN-deepseek"
-    model_name: "deepseek-v3.2"
+  - name: "deepseek-r1-distill-qwen-14b"
+    model_name: "deepseek-r1-distill-qwen-14b"
     api_type: "openai"
-    # 从环境变量读取: IFLOW_CN_API_KEY
-    api_key: "${IFLOW_CN_API_KEY}"
-    base_url: "https://apis.iflow.cn/v1"
+    api_key: "${NVIDIA_API_KEY}"
+    base_url: "https://integrate.api.nvidia.com/v1"
     enabled: true
 
-  # IFLOW_ROME 模型
-  - name: "IFLOW_ROME"
-    model_name: "iflow-rome-30ba3b"
+  - name: "kimi-k2-thinking"
+    model_name: "kimi-k2-thinking"
     api_type: "openai"
-    # 从环境变量读取: IFLOW_ROME_API_KEY
-    api_key: "${IFLOW_ROME_API_KEY}"
-    base_url: "https://apis.iflow.cn/v1"
+    api_key: "${NVIDIA_API_KEY}"
+    base_url: "https://integrate.api.nvidia.com/v1"
     enabled: true
 
-  # ZENMUX 模型
-  - name: "ZENMUX-GLM"
-    model_name: "z-ai/glm-4.7-flash-free"
+  - name: "qwen3-coder-480b-a35b-instruct"
+    model_name: "qwen3-coder-480b-a35b-instruct"
     api_type: "openai"
-    # 从环境变量读取: ZENMUX_API_KEY
-    api_key: "${ZENMUX_API_KEY}"
-    base_url: "https://zenmux.ai/api/v1"
+    api_key: "${NVIDIA_API_KEY}"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    enabled: true
+
+  - name: "devstral-2-123b-instruct-2512"
+    model_name: "devstral-2-123b-instruct-2512"
+    api_type: "openai"
+    api_key: "${NVIDIA_API_KEY}"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    enabled: true
+
+  - name: "qwen3-next-80b-a3b-thinking"
+    model_name: "qwen3-next-80b-a3b-thinking"
+    api_type: "openai"
+    api_key: "${NVIDIA_API_KEY}"
+    base_url: "https://integrate.api.nvidia.com/v1"
     enabled: true
 
 # 分析参数
 analysis:
   question_count: 5
   use_example_style: true
+
+# 持续运行配置（支持长期运行）
+continuous:
+  enabled: false  # 是否启用持续运行模式
+  interval_minutes: 60  # 运行间隔（分钟）
+  max_runs: null  # 最大运行次数，null 表示无限运行
+  similarity_threshold: 0.85  # 问题相似度阈值（0-1）
+  history_file: null  # 问题历史文件路径，null 使用默认路径
+  archive_days: 365  # 归档超过多少天的问题
