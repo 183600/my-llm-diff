@@ -979,7 +979,7 @@ class LLMDiffAnalyzer:
                     - ModelConfig列表（每个模型独立配置）
         
         Returns:
-            模型响应列表
+            模型响应列表（失败的模型不会包含在列表中）
         """
         responses = []
         for model in models:
@@ -996,8 +996,8 @@ class LLMDiffAnalyzer:
                     )
                     responses.append(ModelResponse(model_name=display_name, response=answer))
                 except Exception as e:
-                    print(f"模型 {display_name} 回答失败: {e}")
-                    responses.append(ModelResponse(model_name=display_name, response=f"[错误: {e}]"))
+                    print(f"模型 {display_name} 回答失败: {e}，跳过该模型")
+                    # 不添加失败的response，直接跳过
             else:
                 # 向后兼容：字符串模型名，使用默认客户端配置
                 model_name = model
@@ -1005,8 +1005,8 @@ class LLMDiffAnalyzer:
                     answer = self.llm.chat(model_name, [{"role": "user", "content": question}])
                     responses.append(ModelResponse(model_name=model_name, response=answer))
                 except Exception as e:
-                    print(f"模型 {model_name} 回答失败: {e}")
-                    responses.append(ModelResponse(model_name=model_name, response=f"[错误: {e}]"))
+                    print(f"模型 {model_name} 回答失败: {e}，跳过该模型")
+                    # 不添加失败的response，直接跳过
         return responses
     
     def analyze_differences(self, question: str, responses: list[ModelResponse],
@@ -1610,18 +1610,28 @@ class LLMDiffAnalyzer:
         
         print(f"生成了 {len(questions)} 个新问题（已去重）")
         
-        # 将问题添加到历史记录
-        if self.question_history:
-            added = self.question_history.add_questions(questions)
-            print(f"已记录 {len(added)} 个新问题到历史")
+        # 注意：不在这里添加历史记录，等收集回答成功后再添加
         
         # 2. 收集回答
         print("\n[2/6] 收集各模型回答...")
+        successful_questions = []  # 记录成功获取回答的问题
         for i, question in enumerate(questions):
             print(f"  处理问题 {i+1}/{len(questions)}: {question[:50]}...")
             result = QuestionResult(question=question)
             result.responses = self.get_responses(question, models)
+            
+            # 如果没有任何成功的response，跳过该问题
+            if not result.responses:
+                print(f"  警告: 问题 {i+1} 所有模型调用均失败，跳过该问题")
+                continue
+            
             self.results.append(result)
+            successful_questions.append(question)
+        
+        # 将成功获取回答的问题添加到历史记录
+        if self.question_history and successful_questions:
+            added = self.question_history.add_questions(successful_questions)
+            print(f"已记录 {len(added)} 个成功的问题到历史")
         
         # 3. 分析差异
         print("\n[3/6] 分析回答差异...")
