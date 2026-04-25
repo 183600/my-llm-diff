@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "last_updated": "2026-04-25T02:17:28.440279",
-  "total_questions": 245,
+  "last_updated": "2026-04-25T05:46:38.391728",
+  "total_questions": 250,
   "questions": {
     "2edc1d5cc8c5ea76685e8738541036d7": {
       "question": "范畴论中余极限的极限与极限的余极限在什么条件下交换",
@@ -1226,6 +1226,31 @@
     "8bddddf3ecfd65a972bb8da5a1ea676f": {
       "question": "详细介绍Grothendieck拓扑的公理化构造",
       "timestamp": "2026-04-25T02:17:28.439764",
+      "count": 1
+    },
+    "84f168ec60cb9190133aff48e9dfbef4": {
+      "question": "Monad 和 Comonad 哪个更反人类直觉",
+      "timestamp": "2026-04-25T05:46:38.340370",
+      "count": 1
+    },
+    "60831b6758a6ab1ebf8c8a41a87382a5": {
+      "question": "唐朝诗人和宋朝词人谁的平均创作速度更快，跟他们的抑郁程度有关吗",
+      "timestamp": "2026-04-25T05:46:38.348973",
+      "count": 1
+    },
+    "8cb0e39c209264756c7c9af9ad576b46": {
+      "question": "用Vim的人和用Emacs的人谁的指甲生长速度更快，跟键盘磨损率相关吗",
+      "timestamp": "2026-04-25T05:46:38.365843",
+      "count": 1
+    },
+    "0682ba1adb9dc844da943952d979fcf1": {
+      "question": "除了忒修斯之船和中文房间还有什么思想实验能让人怀疑自己是NPC",
+      "timestamp": "2026-04-25T05:46:38.377696",
+      "count": 1
+    },
+    "c9cea1484dcf128a3571fbfc43a0af7a": {
+      "question": "不同血型的人搞砸初次约会的姿势有统计学差异吗",
+      "timestamp": "2026-04-25T05:46:38.389286",
       "count": 1
     }
   }
