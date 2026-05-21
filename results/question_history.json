@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "last_updated": "2026-05-20T15:23:34.763870",
-  "total_questions": 259,
+  "last_updated": "2026-05-21T18:48:58.989920",
+  "total_questions": 284,
   "questions": {
     "72988136667f0d92044e12bd2e360d38": {
       "question": "为什么拓扑学家分不清咖啡杯和甜甜圈但分得清他们的咖啡伴侣",
@@ -1296,6 +1296,131 @@
     "e91eeee7de11d07bd08221be36b9f3ca": {
       "question": "prove ℙ(ℕ) 和 ℝ 等势的具体构造",
       "timestamp": "2026-05-20T15:23:34.761440",
+      "count": 1
+    },
+    "fd3d0e8e177202b5baa31f0c7d635afb": {
+      "question": "I need answer these question in 我需要的是问题 answer this question in aper. -cal边框切朗库尔蒂埃加尔解释 &\\infty &\\infty & yes &\\infty讲一位,曹植他大会是这句话中\"**",
+      "timestamp": "2026-05-21T12:52:39.898049",
+      "count": 1
+    },
+    "4e0e1bcf5d14fd163cf8ad3d5d4532b0": {
+      "question": "这个问题似乎是在问一个**中文语境下的文学/历史常识判断**，具体涉及白关于\"曹植\"是否在\"10。\"这句话中\"。让我来分析：",
+      "timestamp": "2026-05-21T12:52:39.914218",
+      "count": 1
+    },
+    "62e7461d583a2ce88769dcd6cc7e0f81": {
+      "question": "加油,\"嘎吱揉揉,月经潮热— This appears to be a corrupted or mixed text, possibly containing Chinese characters and some garbled content. Let me try to parse this:",
+      "timestamp": "2026-05-21T12:52:39.933375",
+      "count": 1
+    },
+    "1c1e00e8848bf9c081d22c0253c44c55": {
+      "question": ". The user is asking me to answer a question, but the text is mixed with garbled content. Let me lookgg hinged: \"岁、5是什么号、国心理学家他大部会是他给来和于开会c\" and \"### instruction:是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是是**\"]",
+      "timestamp": "2026-05-21T12:52:39.957905",
+      "count": 1
+    },
+    "38974b8e5b36af48984c05c7fa4975ed": {
+      "question": "This text is garbled. It seemslutely似乎 the user's query got corrupted with some random text.. Let me try to extract the meaningful question:",
+      "timestamp": "2026-05-21T12:52:39.975554",
+      "count": 1
+    },
+    "7dca7cbddfefce6b851a1c114b9c1e80": {
+      "question": "费马大定理和哥德尔不完备定理哪个更让希尔伯特失眠",
+      "timestamp": "2026-05-21T14:14:08.777188",
+      "count": 1
+    },
+    "1b361ab7c64c0aa410aa01a8c2cfe687": {
+      "question": "假设苏格拉底突然穿越到纽约证券交易所他会买什么股票",
+      "timestamp": "2026-05-21T14:14:08.792275",
+      "count": 1
+    },
+    "4f25980297f6f28d776bfd6c92f6e6ca": {
+      "question": "拓扑学中的纽结理论能解释耳机线为什么总是缠在一起吗",
+      "timestamp": "2026-05-21T14:14:08.813065",
+      "count": 1
+    },
+    "abbc91682ad4eafb28d58e4601c1ba66": {
+      "question": "秦朝法律和罗马法哪个对当代程序员更友好",
+      "timestamp": "2026-05-21T14:14:08.821040",
+      "count": 1
+    },
+    "0c86ac4509db36f4fedd50124787a2ba": {
+      "question": "比较一下蝙蝠回声定位能力和人类视力在进化上的性价比",
+      "timestamp": "2026-05-21T14:14:08.838505",
+      "count": 1
+    },
+    "5bd6b7d8a894bf1bc0b349a9046e3b9c": {
+      "question": "同伦论和同调论哪个更性感",
+      "timestamp": "2026-05-21T15:26:24.192135",
+      "count": 1
+    },
+    "c6f652557903f23efd690b65ea01e5ce": {
+      "question": "拓扑学家的头发真的更容易油吗",
+      "timestamp": "2026-05-21T15:26:24.205312",
+      "count": 1
+    },
+    "364224e9b1d2afe8a4c614bca4b4dc09": {
+      "question": "中世纪欧洲哪个修道院的图书馆藏书量相当于今天多少个G的数据",
+      "timestamp": "2026-05-21T15:26:24.219354",
+      "count": 1
+    },
+    "8b765e8751e9b9d4450cd929f3a9b25d": {
+      "question": "费马大定理和黎曼假设哪个更让欧拉嫉妒",
+      "timestamp": "2026-05-21T15:26:24.232353",
+      "count": 1
+    },
+    "05053aedab4abf2ba09040b7587cca0b": {
+      "question": "00后程序员写注释时内心戏平均值估计",
+      "timestamp": "2026-05-21T15:26:24.245313",
+      "count": 1
+    },
+    "d6ca6704eac51c961dbebeb6f99acf01": {
+      "question": "程序化交易和禅宗打坐哪个更容易进入心流状态",
+      "timestamp": "2026-05-21T17:14:22.128311",
+      "count": 1
+    },
+    "6f9e8965bae6bcec93f4f7a414c46d60": {
+      "question": "拓扑绝缘体和咖啡拉花在几何本质上有什么共通",
+      "timestamp": "2026-05-21T17:14:22.142805",
+      "count": 1
+    },
+    "432c1930af013a5070575310dfceeca0": {
+      "question": "《红楼梦》里谁如果穿越到现在的抖音粉丝最多",
+      "timestamp": "2026-05-21T17:14:22.156491",
+      "count": 1
+    },
+    "01b6ee8d5c41ee2528f25533fd18dcad": {
+      "question": "质子和中子的质量差如果增大十倍宇宙会怎样",
+      "timestamp": "2026-05-21T17:14:22.169609",
+      "count": 1
+    },
+    "ba9e6a103b03ccbd630f3d6b4ecf7851": {
+      "question": "宋代科举考生和当代公务员谁的备考焦虑指数更高",
+      "timestamp": "2026-05-21T17:14:22.183085",
+      "count": 1
+    },
+    "6de78a0461584252d48ce658846d2307": {
+      "question": "双射和对称群哪个更基础",
+      "timestamp": "2026-05-21T18:48:58.925604",
+      "count": 1
+    },
+    "02d7cbb35ecf29ae4cdb24fbf3910369": {
+      "question": "费曼技巧和西蒙学习法哪个更适合学范畴论",
+      "timestamp": "2026-05-21T18:48:58.934077",
+      "count": 1
+    },
+    "b064281654de1b1d933d637bd244a8f8": {
+      "question": "尼日利亚约鲁巴人和埃塞俄比亚阿姆哈拉人常染差异有多大",
+      "timestamp": "2026-05-21T18:48:58.960361",
+      "count": 1
+    },
+    "df11234710b435b6adf4b66df0481a2e": {
+      "question": "要是90后当众念错多音字，60后、70后、80后、00后哪个最忍不住要纠正，做个容忍度排名",
+      "timestamp": "2026-05-21T18:48:58.975391",
+      "count": 1
+    },
+    "7e6b4841ee11aea4937013e59aa038fe": {
+      "question": "拓扑学里连续和连通哪个概念更深刻",
+      "timestamp": "2026-05-21T18:48:58.987543",
       "count": 1
     }
   }
